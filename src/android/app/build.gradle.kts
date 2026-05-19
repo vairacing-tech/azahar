@@ -211,6 +211,7 @@ dependencies {
     implementation("io.coil-kt:coil:2.7.0")
     implementation("org.ini4j:ini4j:0.5.4")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.2")
+    implementation("com.google.zxing:core:3.5.3")
 }
 
 // Download Vulkan Validation Layers from the KhronosGroup GitHub.

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Azahar Second Screen</string>
+    <string name="scan_qr">Scan pairing QR</string>
+    <string name="waiting_for_pairing">Scan the QR code shown in Azahar on the Odin.</string>
+    <string name="connecting">Connecting…</string>
+    <string name="connected">Connected</string>
+    <string name="connection_failed">Connection failed: %1$s</string>
+</resources>

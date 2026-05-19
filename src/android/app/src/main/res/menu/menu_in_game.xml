@@ -43,6 +43,11 @@
         android:title="@string/emulation_rotate_upright" />
 
     <item
+        android:id="@+id/menu_dual_device_cast"
+        android:icon="@drawable/ic_splitscreen"
+        android:title="@string/dual_device_cast" />
+
+    <item
         android:id="@+id/menu_lock_drawer"
         android:icon="@drawable/ic_unlocked"
         android:title="@string/lock_drawer" />

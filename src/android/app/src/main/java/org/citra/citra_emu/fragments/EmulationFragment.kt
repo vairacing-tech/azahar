@@ -346,6 +346,18 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
                     true
                 }
 
+                R.id.menu_dual_device_cast -> {
+                    emulationActivity.toggleDualDeviceCast()
+                    it.title = resources.getString(
+                        if (emulationActivity.isDualDeviceCastRunning()) {
+                            R.string.dual_device_cast_stop
+                        } else {
+                            R.string.dual_device_cast
+                        }
+                    )
+                    true
+                }
+
                 R.id.menu_lock_drawer -> {
                     when (EmulationMenuSettings.drawerLockMode) {
                         DrawerLayout.LOCK_MODE_UNLOCKED -> {

@@ -1,0 +1,413 @@
+// Copyright Citra Emulator Project / Azahar Emulator Project
+// Licensed under GPLv2 or any later version
+// Refer to the license.txt file included.
+
+package org.citra.citra_emu.dualdevice
+
+import android.app.Dialog
+import android.graphics.Bitmap
+import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
+import android.net.Uri
+import android.os.Build
+import android.view.Surface
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
+import java.io.BufferedReader
+import java.io.Closeable
+import java.io.InputStreamReader
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import java.nio.ByteBuffer
+import java.util.EnumMap
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import org.citra.citra_emu.NativeLibrary
+import org.citra.citra_emu.R
+import org.citra.citra_emu.activities.EmulationActivity
+import org.citra.citra_emu.display.ScreenLayout
+import org.citra.citra_emu.display.SecondaryDisplayLayout
+import org.citra.citra_emu.features.settings.model.IntSetting
+import org.citra.citra_emu.features.settings.model.Settings
+import org.citra.citra_emu.features.settings.utils.SettingsFile
+import org.citra.citra_emu.utils.Log
+
+class DualDeviceCastHost(
+    private val activity: EmulationActivity,
+    private val settings: Settings,
+    private val releaseSecondaryDisplay: () -> Unit,
+    private val restoreSecondaryDisplay: () -> Unit,
+) : Closeable {
+    private val executor: ExecutorService = Executors.newCachedThreadPool()
+    private val running = AtomicBoolean(false)
+    private val token = UUID.randomUUID().toString().replace("-", "")
+
+    private var serverSocket: ServerSocket? = null
+    private var controlSocket: Socket? = null
+    private var videoSocket: DatagramSocket? = null
+    private var receiverAddress: java.net.InetAddress? = null
+    private var receiverVideoPort = 0
+    private var encoder: MediaCodec? = null
+    private var encoderSurface: Surface? = null
+    private var pairingDialog: Dialog? = null
+    private var sequence = 0
+
+    private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
+    private val previousSecondaryLayout = IntSetting.SECONDARY_DISPLAY_LAYOUT.int
+
+    val isRunning: Boolean
+        get() = running.get()
+
+    fun start() {
+        if (!running.compareAndSet(false, true)) {
+            return
+        }
+
+        try {
+            serverSocket = ServerSocket(0)
+            videoSocket = DatagramSocket()
+            applyCastLayout()
+            executor.execute(::acceptControlClient)
+        } catch (e: Exception) {
+            close()
+            throw e
+        }
+    }
+
+    fun showPairingDialog() {
+        val qr = createQrBitmap(pairingUri(), 720)
+        val density = activity.resources.displayMetrics.density
+        val content = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = (24 * density).toInt()
+            setPadding(padding, padding, padding, 0)
+        }
+        val message = TextView(activity).apply {
+            setText(R.string.dual_device_cast_pairing_message)
+            textAlignment = TextView.TEXT_ALIGNMENT_CENTER
+        }
+        val image = ImageView(activity).apply {
+            setImageBitmap(qr)
+            adjustViewBounds = true
+            maxWidth = (320 * density).toInt()
+            maxHeight = (320 * density).toInt()
+        }
+        val status = TextView(activity).apply {
+            setText(R.string.dual_device_cast_waiting)
+            textAlignment = TextView.TEXT_ALIGNMENT_CENTER
+        }
+        content.addView(message)
+        content.addView(image)
+        content.addView(status)
+
+        pairingDialog = MaterialAlertDialogBuilder(activity)
+            .setTitle(R.string.dual_device_cast_pairing_title)
+            .setView(content)
+            .setNegativeButton(android.R.string.cancel) { _, _ -> close() }
+            .show()
+    }
+
+    private fun pairingUri(): String {
+        val host = findLocalIpv4Address()
+        val controlPort = serverSocket?.localPort ?: 0
+        val videoPort = videoSocket?.localPort ?: 0
+        return Uri.Builder()
+            .scheme("azahar2device")
+            .authority("join")
+            .appendQueryParameter("host", host)
+            .appendQueryParameter("control", controlPort.toString())
+            .appendQueryParameter("video", videoPort.toString())
+            .appendQueryParameter("token", token)
+            .appendQueryParameter("screen", "bottom")
+            .build()
+            .toString()
+    }
+
+    private fun applyCastLayout() {
+        IntSetting.SCREEN_LAYOUT.int = ScreenLayout.SINGLE_SCREEN.int
+        IntSetting.SECONDARY_DISPLAY_LAYOUT.int = SecondaryDisplayLayout.BOTTOM_SCREEN.int
+        settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        NativeLibrary.reloadSettings()
+        NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+        releaseSecondaryDisplay()
+    }
+
+    private fun restoreLayout() {
+        IntSetting.SCREEN_LAYOUT.int = previousScreenLayout
+        IntSetting.SECONDARY_DISPLAY_LAYOUT.int = previousSecondaryLayout
+        settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        NativeLibrary.reloadSettings()
+        NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+    }
+
+    private fun acceptControlClient() {
+        try {
+            val socket = serverSocket?.accept() ?: return
+            controlSocket = socket
+            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            val hello = reader.readLine() ?: throw IllegalStateException("Receiver disconnected")
+            val parts = hello.trim().split(" ")
+            if (parts.size != 3 || parts[0] != "HELLO" || parts[1] != token) {
+                socket.getOutputStream().write("ERR auth\n".toByteArray())
+                throw IllegalArgumentException("Invalid receiver token")
+            }
+
+            receiverAddress = socket.inetAddress
+            receiverVideoPort = parts[2].toInt()
+            socket.getOutputStream().write("OK $CAST_WIDTH $CAST_HEIGHT $CAST_FPS\n".toByteArray())
+            activity.runOnUiThread {
+                Toast.makeText(activity, R.string.dual_device_cast_connected, Toast.LENGTH_SHORT).show()
+                pairingDialog?.dismiss()
+                pairingDialog = null
+            }
+
+            startEncoder()
+            readControlMessages(reader)
+        } catch (e: Exception) {
+            if (running.get()) {
+                Log.error("[DualDeviceCastHost] ${e.message}")
+                activity.runOnUiThread {
+                    Toast.makeText(
+                        activity,
+                        activity.getString(R.string.dual_device_cast_error, e.message ?: "unknown"),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            close()
+        }
+    }
+
+    private fun readControlMessages(reader: BufferedReader) {
+        while (running.get()) {
+            val line = reader.readLine() ?: break
+            val parts = line.trim().split(" ")
+            if (parts.isEmpty()) continue
+            when (parts[0].uppercase(Locale.US)) {
+                "TOUCH" -> handleTouch(parts)
+                "PING" -> controlSocket?.getOutputStream()?.write("PONG\n".toByteArray())
+                "STOP" -> break
+            }
+        }
+    }
+
+    private fun handleTouch(parts: List<String>) {
+        if (parts.size < 4) return
+        val action = parts[1]
+        val x = (parts[2].toFloatOrNull() ?: return).coerceIn(0f, 1f) * CAST_WIDTH
+        val y = (parts[3].toFloatOrNull() ?: return).coerceIn(0f, 1f) * CAST_HEIGHT
+        when (action) {
+            "down" -> NativeLibrary.onSecondaryTouchEvent(x, y, true)
+            "move" -> NativeLibrary.onSecondaryTouchMoved(x, y)
+            "up", "cancel" -> NativeLibrary.onSecondaryTouchEvent(0f, 0f, false)
+        }
+    }
+
+    private fun startEncoder() {
+        val format = MediaFormat.createVideoFormat(
+            MediaFormat.MIMETYPE_VIDEO_AVC,
+            CAST_WIDTH,
+            CAST_HEIGHT
+        ).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, CAST_BITRATE)
+            setInteger(MediaFormat.KEY_FRAME_RATE, CAST_FPS)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setInteger(MediaFormat.KEY_LATENCY, 0)
+            }
+        }
+        val codec = createHardwareAvcEncoder()
+        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        encoderSurface = codec.createInputSurface()
+        encoder = codec
+        codec.start()
+        NativeLibrary.secondarySurfaceChanged(encoderSurface!!)
+        executor.execute(::drainEncoder)
+    }
+
+    private fun createHardwareAvcEncoder(): MediaCodec {
+        val encoderInfo = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
+            it.isEncoder &&
+                it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                it.isHardwareEncoder() &&
+                it.supportsSurfaceInput()
+        } ?: throw IllegalStateException("No hardware AVC encoder with Surface input")
+
+        Log.info("[DualDeviceCastHost] Using hardware encoder ${encoderInfo.name}")
+        return MediaCodec.createByCodecName(encoderInfo.name)
+    }
+
+    private fun MediaCodecInfo.isHardwareEncoder(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return isHardwareAccelerated && !isSoftwareOnly
+        }
+
+        val lowerName = name.lowercase(Locale.US)
+        val knownSoftwarePrefixes = listOf(
+            "omx.google.",
+            "c2.android.",
+            "c2.google.",
+            "ffmpeg"
+        )
+        return knownSoftwarePrefixes.none { lowerName.startsWith(it) }
+    }
+
+    private fun MediaCodecInfo.supportsSurfaceInput(): Boolean {
+        return try {
+            getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                .colorFormats
+                .contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun drainEncoder() {
+        val info = MediaCodec.BufferInfo()
+        val codec = encoder ?: return
+        while (running.get()) {
+            val index = codec.dequeueOutputBuffer(info, 10_000)
+            if (index < 0) continue
+            val buffer = codec.getOutputBuffer(index)
+            if (buffer != null && info.size > 0) {
+                buffer.position(info.offset)
+                buffer.limit(info.offset + info.size)
+                val data = ByteArray(info.size)
+                buffer.get(data)
+                val flags = when {
+                    info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 -> FLAG_CONFIG
+                    info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 -> FLAG_KEY_FRAME
+                    else -> FLAG_FRAME
+                }
+                sendVideoFrame(data, info.presentationTimeUs, flags)
+            }
+            codec.releaseOutputBuffer(index, false)
+        }
+    }
+
+    private fun sendVideoFrame(data: ByteArray, presentationTimeUs: Long, flags: Int) {
+        val address = receiverAddress ?: return
+        val port = receiverVideoPort
+        if (port <= 0) return
+        val socket = videoSocket ?: return
+        val frameSequence = sequence++
+        val chunkCount = ((data.size + MAX_PAYLOAD - 1) / MAX_PAYLOAD).coerceAtLeast(1)
+        var offset = 0
+        for (chunkIndex in 0 until chunkCount) {
+            val payloadSize = minOf(MAX_PAYLOAD, data.size - offset)
+            val packet = ByteBuffer.allocate(HEADER_SIZE + payloadSize)
+            packet.putInt(MAGIC)
+            packet.putInt(frameSequence)
+            packet.putLong(presentationTimeUs)
+            packet.put(flags.toByte())
+            packet.putShort(chunkIndex.toShort())
+            packet.putShort(chunkCount.toShort())
+            packet.put(data, offset, payloadSize)
+            val bytes = packet.array()
+            socket.send(DatagramPacket(bytes, bytes.size, address, port))
+            offset += payloadSize
+        }
+    }
+
+    override fun close() {
+        if (!running.compareAndSet(true, false)) {
+            return
+        }
+        try {
+            NativeLibrary.secondarySurfaceDestroyed()
+        } catch (_: Exception) {
+        }
+        closeEncoder()
+        controlSocket.closeQuietly()
+        serverSocket.closeQuietly()
+        videoSocket.closeQuietly()
+        executor.shutdownNow()
+        activity.runOnUiThread {
+            pairingDialog?.dismiss()
+            pairingDialog = null
+            restoreLayout()
+            restoreSecondaryDisplay()
+            Toast.makeText(activity, R.string.dual_device_cast_stopped, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun closeEncoder() {
+        try {
+            encoder?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            encoder?.release()
+        } catch (_: Exception) {
+        }
+        encoder = null
+        encoderSurface?.release()
+        encoderSurface = null
+    }
+
+    private fun findLocalIpv4Address(): String {
+        NetworkInterface.getNetworkInterfaces().toList().forEach { networkInterface ->
+            if (!networkInterface.isUp || networkInterface.isLoopback) return@forEach
+            networkInterface.inetAddresses.toList().forEach { address ->
+                if (address is Inet4Address && !address.isLoopbackAddress) {
+                    return address.hostAddress ?: "127.0.0.1"
+                }
+            }
+        }
+        return "127.0.0.1"
+    }
+
+    private fun createQrBitmap(contents: String, size: Int): Bitmap {
+        val hints = EnumMap<EncodeHintType, Any>(EncodeHintType::class.java)
+        hints[EncodeHintType.MARGIN] = 1
+        val matrix = QRCodeWriter().encode(contents, BarcodeFormat.QR_CODE, size, size, hints)
+        val pixels = IntArray(size * size)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                pixels[y * size + x] = if (matrix[x, y]) 0xFF000000.toInt() else 0xFFFFFFFF.toInt()
+            }
+        }
+        return Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun Closeable?.closeQuietly() {
+        try {
+            this?.close()
+        } catch (_: Exception) {
+        }
+    }
+
+    companion object {
+        private const val CAST_WIDTH = 640
+        private const val CAST_HEIGHT = 480
+        private const val CAST_FPS = 60
+        private const val CAST_BITRATE = 4_000_000
+        private const val MAGIC = 0x415A3244 // AZ2D
+        private const val HEADER_SIZE = 21
+        private const val MAX_PAYLOAD = 1180
+        private const val FLAG_FRAME = 0
+        private const val FLAG_KEY_FRAME = 1
+        private const val FLAG_CONFIG = 2
+    }
+}
