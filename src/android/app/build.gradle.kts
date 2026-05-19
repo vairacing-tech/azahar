@@ -20,7 +20,14 @@ plugins {
  * next 680 years.
  */
 val autoVersion = (((System.currentTimeMillis() / 1000) - 1451606400) / 10).toInt()
-val abiFilter = listOf("arm64-v8a", "x86_64")
+val abiFilter = providers.gradleProperty("azaharAbiFilters")
+    .map { abiList ->
+        abiList.split(",")
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+    }
+    .orElse(listOf("arm64-v8a", "x86_64"))
+    .get()
 
 val downloadedJniLibsPath = "${layout.buildDirectory.get().asFile.path}/downloadedJniLibs"
 
