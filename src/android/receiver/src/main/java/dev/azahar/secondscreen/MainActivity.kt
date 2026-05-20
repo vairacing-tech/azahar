@@ -111,8 +111,10 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun buildUi() {
-        val root = FrameLayout(this)
-        surfaceView = SurfaceView(this).apply {
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(0xFF000000.toInt())
+        }
+        surfaceView = AspectSurfaceView(this).apply {
             holder.addCallback(this@MainActivity)
             keepScreenOn = true
             setOnTouchListener(::onTouch)
@@ -135,7 +137,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             addView(statusText)
             addView(scanButton)
         }
-        root.addView(surfaceView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(
+            surfaceView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+        )
         root.addView(overlayView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         setContentView(root)
     }
@@ -409,8 +418,32 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     companion object {
+        private const val SCREEN_ASPECT_RATIO = 4f / 3f
         private const val MAGIC = 0x415A3244
         private const val HEADER_SIZE = 21
         private const val FLAG_CONFIG = 2
+    }
+
+    private class AspectSurfaceView(context: android.content.Context) : SurfaceView(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val availableWidth = MeasureSpec.getSize(widthMeasureSpec)
+            val availableHeight = MeasureSpec.getSize(heightMeasureSpec)
+            if (availableWidth == 0 || availableHeight == 0) {
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                return
+            }
+
+            val availableAspect = availableWidth.toFloat() / availableHeight.toFloat()
+            val measuredWidth: Int
+            val measuredHeight: Int
+            if (availableAspect > SCREEN_ASPECT_RATIO) {
+                measuredHeight = availableHeight
+                measuredWidth = (availableHeight * SCREEN_ASPECT_RATIO).toInt()
+            } else {
+                measuredWidth = availableWidth
+                measuredHeight = (availableWidth / SCREEN_ASPECT_RATIO).toInt()
+            }
+            setMeasuredDimension(measuredWidth, measuredHeight)
+        }
     }
 }
