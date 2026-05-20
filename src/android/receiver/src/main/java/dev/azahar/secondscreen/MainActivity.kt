@@ -6,6 +6,7 @@ package dev.azahar.secondscreen
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaCodec
 import android.media.MediaFormat
@@ -19,6 +20,7 @@ import android.view.SurfaceView
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -46,6 +48,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val executor = Executors.newCachedThreadPool()
     private val running = AtomicBoolean(false)
     private lateinit var surfaceView: SurfaceView
+    private lateinit var overlayView: LinearLayout
     private lateinit var statusText: TextView
     private var decoder: MediaCodec? = null
     private var controlSocket: Socket? = null
@@ -69,9 +72,16 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildUi()
         surfaceView.post { hideSystemUi() }
         intent?.data?.let { connect(it) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.data?.let { connect(it) }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -104,6 +114,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         val root = FrameLayout(this)
         surfaceView = SurfaceView(this).apply {
             holder.addCallback(this@MainActivity)
+            keepScreenOn = true
             setOnTouchListener(::onTouch)
         }
         statusText = TextView(this).apply {
@@ -118,14 +129,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             setText(R.string.scan_qr)
             setOnClickListener { requestCameraThenScan() }
         }
-        val overlay = LinearLayout(this).apply {
+        overlayView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             addView(statusText)
             addView(scanButton)
         }
         root.addView(surfaceView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-        root.addView(overlay, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(overlayView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         setContentView(root)
     }
 
@@ -197,13 +208,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             startDecoder(surface, width, height)
             runOnUiThread {
                 statusText.setText(R.string.connected)
-                statusText.visibility = View.GONE
+                overlayView.visibility = View.GONE
             }
             executor.execute { readHostControl(reader) }
             receiveVideo(udp)
         } catch (e: Exception) {
             if (running.get()) {
                 runOnUiThread {
+                    overlayView.visibility = View.VISIBLE
                     statusText.visibility = View.VISIBLE
                     statusText.text = getString(R.string.connection_failed, e.message ?: "unknown")
                 }
