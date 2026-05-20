@@ -11,9 +11,13 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.Surface
@@ -45,6 +49,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -274,7 +279,9 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun runConnection(session: Session, surface: Surface) {
         try {
-            val udp = DatagramSocket(0)
+            val udp = DatagramSocket(0).apply {
+                receiveBufferSize = VIDEO_SOCKET_BUFFER_BYTES
+            }
             udpSocket = udp
             val socket = Socket(session.host, session.controlPort)
             controlSocket = socket
@@ -312,9 +319,144 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun startDecoder(surface: Surface, width: Int, height: Int) {
-        decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-            configure(MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height), surface, null, 0)
+        val decoderInfo = selectHardwareAvcDecoder(width, height)
+        decoder = createConfiguredDecoder(decoderInfo, surface, width, height).apply {
             start()
+            applyLowLatencyRuntimeParameters(this)
+        }
+    }
+
+    private fun selectHardwareAvcDecoder(width: Int, height: Int): MediaCodecInfo {
+        val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter {
+                !it.isEncoder &&
+                    it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    it.isHardwareCodec() &&
+                    !it.isSecureOrTunneledCodec() &&
+                    it.supportsAvcSize(width, height, CAST_FPS)
+            }
+            .sortedWith(
+                compareByDescending<MediaCodecInfo> { it.preferenceScore() }
+                    .thenBy { it.name }
+            )
+
+        val decoderInfo = candidates.firstOrNull()
+            ?: throw IllegalStateException("No hardware AVC decoder")
+        val vendor = if (decoderInfo.isQualcommCodec()) "Qualcomm" else "hardware"
+        Log.i(TAG, "Using $vendor decoder ${decoderInfo.name} ${width}x${height}@$CAST_FPS")
+        return decoderInfo
+    }
+
+    private fun createConfiguredDecoder(
+        decoderInfo: MediaCodecInfo,
+        surface: Surface,
+        width: Int,
+        height: Int,
+    ): MediaCodec {
+        return tryCreateConfiguredDecoder(decoderInfo, surface, width, height, tuned = true)
+            ?: tryCreateConfiguredDecoder(decoderInfo, surface, width, height, tuned = false)
+            ?: throw IllegalStateException("Unable to configure hardware AVC decoder ${decoderInfo.name}")
+    }
+
+    private fun tryCreateConfiguredDecoder(
+        decoderInfo: MediaCodecInfo,
+        surface: Surface,
+        width: Int,
+        height: Int,
+        tuned: Boolean,
+    ): MediaCodec? {
+        var codec: MediaCodec? = null
+        return try {
+            codec = MediaCodec.createByCodecName(decoderInfo.name)
+            codec.configure(createDecoderFormat(width, height, tuned), surface, null, 0)
+            codec
+        } catch (e: Exception) {
+            try {
+                codec?.release()
+            } catch (_: Exception) {
+            }
+            if (tuned) {
+                Log.w(TAG, "Tuned decoder config failed, retrying baseline", e)
+            }
+            null
+        }
+    }
+
+    private fun createDecoderFormat(width: Int, height: Int, tuned: Boolean): MediaFormat {
+        return MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setInteger(MediaFormat.KEY_LATENCY, 0)
+            }
+            if (tuned) {
+                setInteger("low-latency", 1)
+                setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
+            }
+        }
+    }
+
+    private fun applyLowLatencyRuntimeParameters(codec: MediaCodec) {
+        try {
+            codec.setParameters(Bundle().apply {
+                putInt("low-latency", 1)
+                putInt("vendor.qti-ext-dec-low-latency.enable", 1)
+            })
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun MediaCodecInfo.isHardwareCodec(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return isHardwareAccelerated && !isSoftwareOnly
+        }
+
+        val lowerName = name.lowercase(Locale.US)
+        val knownSoftwarePrefixes = listOf(
+            "omx.google.",
+            "c2.android.",
+            "c2.google.",
+            "ffmpeg"
+        )
+        return knownSoftwarePrefixes.none { lowerName.startsWith(it) }
+    }
+
+    private fun MediaCodecInfo.isQualcommCodec(): Boolean {
+        val lowerName = name.lowercase(Locale.US)
+        return lowerName.startsWith("c2.qti.") ||
+            lowerName.startsWith("omx.qcom.") ||
+            lowerName.contains("qti") ||
+            lowerName.contains("qcom")
+    }
+
+    private fun MediaCodecInfo.isSecureOrTunneledCodec(): Boolean {
+        val lowerName = name.lowercase(Locale.US)
+        return lowerName.contains(".secure") || lowerName.contains(".tunneled")
+    }
+
+    private fun MediaCodecInfo.preferenceScore(): Int {
+        val lowerName = name.lowercase(Locale.US)
+        return when {
+            lowerName.startsWith("c2.qti.") -> 400
+            lowerName.startsWith("omx.qcom.") -> 300
+            lowerName.contains("qti") || lowerName.contains("qcom") -> 200
+            else -> 100
+        }
+    }
+
+    private fun MediaCodecInfo.supportsAvcSize(width: Int, height: Int, fps: Int): Boolean {
+        return try {
+            val videoCapabilities = getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                videoCapabilities.areSizeAndRateSupported(width, height, fps.toDouble()) ||
+                    videoCapabilities.isSizeSupported(width, height)
+            } else {
+                videoCapabilities.isSizeSupported(width, height)
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -333,7 +475,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
                 frames.remove(frame.sequence)
                 queueFrame(pending.toByteArray(), pending.presentationTimeUs, pending.flags)
             }
-            if (frames.size > 64) {
+            while (frames.size > MAX_PENDING_FRAMES) {
                 frames.keys.minOrNull()?.let { frames.remove(it) }
             }
         }
@@ -341,19 +483,23 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun queueFrame(data: ByteArray, presentationTimeUs: Long, frameFlags: Int) {
         val codec = decoder ?: return
-        val inputIndex = codec.dequeueInputBuffer(10_000)
-        if (inputIndex < 0) return
-        val inputBuffer = codec.getInputBuffer(inputIndex) ?: return
-        inputBuffer.clear()
-        inputBuffer.put(data)
-        val flags = if (frameFlags == FLAG_CONFIG) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
-        codec.queueInputBuffer(inputIndex, 0, data.size, presentationTimeUs, flags)
+        try {
+            val inputIndex = codec.dequeueInputBuffer(DECODER_INPUT_TIMEOUT_US)
+            if (inputIndex < 0) return
+            val inputBuffer = codec.getInputBuffer(inputIndex) ?: return
+            inputBuffer.clear()
+            inputBuffer.put(data)
+            val flags = if (frameFlags == FLAG_CONFIG) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
+            codec.queueInputBuffer(inputIndex, 0, data.size, presentationTimeUs, flags)
 
-        val info = MediaCodec.BufferInfo()
-        var outputIndex = codec.dequeueOutputBuffer(info, 0)
-        while (outputIndex >= 0) {
-            codec.releaseOutputBuffer(outputIndex, true)
-            outputIndex = codec.dequeueOutputBuffer(info, 0)
+            val info = MediaCodec.BufferInfo()
+            var outputIndex = codec.dequeueOutputBuffer(info, 0)
+            while (outputIndex >= 0) {
+                codec.releaseOutputBuffer(outputIndex, true)
+                outputIndex = codec.dequeueOutputBuffer(info, 0)
+            }
+        } catch (_: IllegalStateException) {
+            stopSession()
         }
     }
 
@@ -558,9 +704,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     companion object {
+        private const val TAG = "AzaharSecondScreen"
         private const val PREFERENCES_NAME = "azahar_second_screen"
         private const val KEY_RESOLUTION_MULTIPLIER = "resolution_multiplier"
         private const val KEY_ASPECT_MODE = "aspect_mode"
+        private const val CAST_FPS = 60
+        private const val MAX_PENDING_FRAMES = 8
+        private const val DECODER_INPUT_TIMEOUT_US = 1_000L
+        private const val VIDEO_SOCKET_BUFFER_BYTES = 256 * 1024
         private const val MAGIC = 0x415A3244
         private const val HEADER_SIZE = 21
         private const val FLAG_CONFIG = 2

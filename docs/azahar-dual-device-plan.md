@@ -18,7 +18,12 @@ Usar Azahar como base para que una Odin 2 Portal ejecute la emulacion de Nintend
 - El host configura el layout local como `SINGLE_SCREEN` y el layout secundario como `BOTTOM_SCREEN` mientras el cast esta activo, restaurando la configuracion previa al parar.
 - El encoder debe ser hardware/GPU. No se permite fallback a encoder software/CPU; si no hay encoder AVC hardware con entrada `Surface`, el cast falla con error.
 - La entrada al encoder usa `MediaCodec.createInputSurface()`, evitando readback CPU de frames.
+- En Snapdragon se priorizan codecs Qualcomm (`c2.qti.*` / `omx.qcom.*`) para AVC. El host codifica con entrada `Surface` y el Poco decodifica a `Surface`, aplicando CBR, prioridad realtime, operating-rate y claves low-latency con fallback a configuracion hardware baseline si el codec rechaza alguna clave vendor.
 - V1 prioriza OpenGL; Vulkan queda para validacion posterior porque Azahar soporta ambos backends.
+
+## Deuda Tecnica
+
+- Renombrar namespaces Android heredados de Citra en el host. Aunque el paquete instalable ya es `org.azahar_emu.azahar.debug`, buena parte del codigo Kotlin/Java sigue bajo `org.citra.citra_emu` por herencia historica del arbol Android de Azahar/Citra. Hacerlo en una pasada dedicada y comprobar imports, JNI, `NativeLibrary`, manifests, rutas de recursos y scripts Gradle. Mantener el receiver como `dev.azahar.secondscreen`.
 
 ## Pruebas
 

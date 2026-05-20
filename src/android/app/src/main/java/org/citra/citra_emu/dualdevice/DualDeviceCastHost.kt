@@ -12,6 +12,7 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.view.Surface
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -81,7 +82,9 @@ class DualDeviceCastHost(
 
         try {
             serverSocket = ServerSocket(0)
-            videoSocket = DatagramSocket()
+            videoSocket = DatagramSocket().apply {
+                sendBufferSize = VIDEO_SOCKET_BUFFER_BYTES
+            }
             applyCastLayout()
             executor.execute(::acceptControlClient)
         } catch (e: Exception) {
@@ -225,7 +228,83 @@ class DualDeviceCastHost(
     }
 
     private fun startEncoder(config: CastConfig) {
-        val format = MediaFormat.createVideoFormat(
+        val encoderInfo = selectHardwareAvcEncoder(config)
+        val codec = createConfiguredEncoder(encoderInfo, config)
+        encoderSurface = codec.createInputSurface()
+        encoder = codec
+        codec.start()
+        applyLowLatencyRuntimeParameters(codec)
+        NativeLibrary.secondarySurfaceChanged(encoderSurface!!)
+        executor.execute(::drainEncoder)
+    }
+
+    private fun selectHardwareAvcEncoder(config: CastConfig): MediaCodecInfo {
+        val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter {
+                it.isEncoder &&
+                    it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    it.isHardwareCodec() &&
+                    !it.isSecureOrTunneledCodec() &&
+                    it.supportsSurfaceInput() &&
+                    it.supportsAvcSize(config.width, config.height, CAST_FPS)
+            }
+            .sortedWith(
+                compareByDescending<MediaCodecInfo> { it.preferenceScore() }
+                    .thenBy { it.name }
+            )
+
+        val encoderInfo = candidates.firstOrNull()
+            ?: throw IllegalStateException("No hardware AVC encoder with Surface input")
+        val vendor = if (encoderInfo.isQualcommCodec()) "Qualcomm" else "hardware"
+        Log.info(
+            "[DualDeviceCastHost] Using $vendor encoder ${encoderInfo.name} " +
+                "${config.width}x${config.height}@$CAST_FPS ${config.bitrate}bps"
+        )
+        return encoderInfo
+    }
+
+    private fun createConfiguredEncoder(
+        encoderInfo: MediaCodecInfo,
+        config: CastConfig,
+    ): MediaCodec {
+        return tryCreateConfiguredEncoder(encoderInfo, config, tuned = true)
+            ?: tryCreateConfiguredEncoder(encoderInfo, config, tuned = false)
+            ?: throw IllegalStateException("Unable to configure hardware AVC encoder ${encoderInfo.name}")
+    }
+
+    private fun tryCreateConfiguredEncoder(
+        encoderInfo: MediaCodecInfo,
+        config: CastConfig,
+        tuned: Boolean,
+    ): MediaCodec? {
+        var codec: MediaCodec? = null
+        return try {
+            codec = MediaCodec.createByCodecName(encoderInfo.name)
+            codec.configure(
+                createEncoderFormat(encoderInfo, config, tuned),
+                null,
+                null,
+                MediaCodec.CONFIGURE_FLAG_ENCODE
+            )
+            codec
+        } catch (e: Exception) {
+            try {
+                codec?.release()
+            } catch (_: Exception) {
+            }
+            if (tuned) {
+                Log.error("[DualDeviceCastHost] Tuned encoder config failed, retrying baseline: ${e.message}")
+            }
+            null
+        }
+    }
+
+    private fun createEncoderFormat(
+        encoderInfo: MediaCodecInfo,
+        config: CastConfig,
+        tuned: Boolean,
+    ): MediaFormat {
+        return MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
             config.width,
             config.height
@@ -236,33 +315,50 @@ class DualDeviceCastHost(
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setInteger(MediaFormat.KEY_LATENCY, 0)
             }
+            if (tuned) {
+                applyEncoderTuning(encoderInfo)
+            }
         }
-        val codec = createHardwareAvcEncoder()
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoderSurface = codec.createInputSurface()
-        encoder = codec
-        codec.start()
-        NativeLibrary.secondarySurfaceChanged(encoderSurface!!)
-        executor.execute(::drainEncoder)
     }
 
-    private fun createHardwareAvcEncoder(): MediaCodec {
-        val encoderInfo = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
-            it.isEncoder &&
-                it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
-                it.isHardwareEncoder() &&
-                it.supportsSurfaceInput()
-        } ?: throw IllegalStateException("No hardware AVC encoder with Surface input")
-
-        Log.info("[DualDeviceCastHost] Using hardware encoder ${encoderInfo.name}")
-        return MediaCodec.createByCodecName(encoderInfo.name)
+    private fun MediaFormat.applyEncoderTuning(encoderInfo: MediaCodecInfo) {
+        val capabilities = encoderInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        val encoderCapabilities = capabilities.encoderCapabilities
+        if (encoderCapabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) {
+            setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+            )
+        }
+        when {
+            encoderInfo.supportsAvcProfile(MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline) ->
+                setInteger(
+                    MediaFormat.KEY_PROFILE,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline
+                )
+            encoderInfo.supportsAvcProfile(MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) ->
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+        }
+        setInteger("low-latency", 1)
+        setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
     }
 
-    private fun MediaCodecInfo.isHardwareEncoder(): Boolean {
+    private fun applyLowLatencyRuntimeParameters(codec: MediaCodec) {
+        try {
+            codec.setParameters(Bundle().apply {
+                putInt("low-latency", 1)
+                putInt("vendor.qti-ext-enc-low-latency.enable", 1)
+            })
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun MediaCodecInfo.isHardwareCodec(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             return isHardwareAccelerated && !isSoftwareOnly
         }
@@ -277,11 +373,58 @@ class DualDeviceCastHost(
         return knownSoftwarePrefixes.none { lowerName.startsWith(it) }
     }
 
+    private fun MediaCodecInfo.isQualcommCodec(): Boolean {
+        val lowerName = name.lowercase(Locale.US)
+        return lowerName.startsWith("c2.qti.") ||
+            lowerName.startsWith("omx.qcom.") ||
+            lowerName.contains("qti") ||
+            lowerName.contains("qcom")
+    }
+
+    private fun MediaCodecInfo.isSecureOrTunneledCodec(): Boolean {
+        val lowerName = name.lowercase(Locale.US)
+        return lowerName.contains(".secure") || lowerName.contains(".tunneled")
+    }
+
+    private fun MediaCodecInfo.preferenceScore(): Int {
+        val lowerName = name.lowercase(Locale.US)
+        return when {
+            lowerName.startsWith("c2.qti.") -> 400
+            lowerName.startsWith("omx.qcom.") -> 300
+            lowerName.contains("qti") || lowerName.contains("qcom") -> 200
+            else -> 100
+        }
+    }
+
     private fun MediaCodecInfo.supportsSurfaceInput(): Boolean {
         return try {
             getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
                 .colorFormats
                 .contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun MediaCodecInfo.supportsAvcSize(width: Int, height: Int, fps: Int): Boolean {
+        return try {
+            val videoCapabilities = getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                videoCapabilities.areSizeAndRateSupported(width, height, fps.toDouble()) ||
+                    videoCapabilities.isSizeSupported(width, height)
+            } else {
+                videoCapabilities.isSizeSupported(width, height)
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun MediaCodecInfo.supportsAvcProfile(profile: Int): Boolean {
+        return try {
+            getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                .profileLevels
+                .any { it.profile == profile }
         } catch (_: Exception) {
             false
         }
@@ -303,14 +446,12 @@ class DualDeviceCastHost(
                 if (buffer != null && info.size > 0) {
                     buffer.position(info.offset)
                     buffer.limit(info.offset + info.size)
-                    val data = ByteArray(info.size)
-                    buffer.get(data)
                     val flags = when {
                         info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 -> FLAG_CONFIG
                         info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 -> FLAG_KEY_FRAME
                         else -> FLAG_FRAME
                     }
-                    sendVideoFrame(data, info.presentationTimeUs, flags)
+                    sendVideoFrame(buffer.slice(), info.size, info.presentationTimeUs, flags)
                 }
             } catch (e: Exception) {
                 if (running.get()) {
@@ -327,27 +468,36 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun sendVideoFrame(data: ByteArray, presentationTimeUs: Long, flags: Int) {
+    private fun sendVideoFrame(
+        data: ByteBuffer,
+        size: Int,
+        presentationTimeUs: Long,
+        flags: Int,
+    ) {
         val address = receiverAddress ?: return
         val port = receiverVideoPort
         if (port <= 0) return
         val socket = videoSocket ?: return
         val frameSequence = sequence++
-        val chunkCount = ((data.size + MAX_PAYLOAD - 1) / MAX_PAYLOAD).coerceAtLeast(1)
+        val chunkCount = ((size + MAX_PAYLOAD - 1) / MAX_PAYLOAD).coerceAtLeast(1)
+        val source = data.duplicate()
+        val packetBytes = ByteArray(HEADER_SIZE + MAX_PAYLOAD)
+        val packetHeader = ByteBuffer.wrap(packetBytes)
         var offset = 0
         for (chunkIndex in 0 until chunkCount) {
-            val payloadSize = minOf(MAX_PAYLOAD, data.size - offset)
-            val packet = ByteBuffer.allocate(HEADER_SIZE + payloadSize)
-            packet.putInt(MAGIC)
-            packet.putInt(frameSequence)
-            packet.putLong(presentationTimeUs)
-            packet.put(flags.toByte())
-            packet.putShort(chunkIndex.toShort())
-            packet.putShort(chunkCount.toShort())
-            packet.put(data, offset, payloadSize)
-            val bytes = packet.array()
+            val payloadSize = minOf(MAX_PAYLOAD, size - offset)
+            packetHeader.clear()
+            packetHeader.putInt(MAGIC)
+            packetHeader.putInt(frameSequence)
+            packetHeader.putLong(presentationTimeUs)
+            packetHeader.put(flags.toByte())
+            packetHeader.putShort(chunkIndex.toShort())
+            packetHeader.putShort(chunkCount.toShort())
+            source.position(offset)
+            source.get(packetBytes, HEADER_SIZE, payloadSize)
+            val packetSize = HEADER_SIZE + payloadSize
             try {
-                socket.send(DatagramPacket(bytes, bytes.size, address, port))
+                socket.send(DatagramPacket(packetBytes, packetSize, address, port))
             } catch (e: Exception) {
                 if (running.get()) {
                     Log.error("[DualDeviceCastHost] Video send failed: ${e.message}")
@@ -489,6 +639,7 @@ class DualDeviceCastHost(
         private const val BASE_BITRATE = 4_000_000
         private const val MIN_BITRATE = 1_500_000
         private const val MAX_BITRATE = 12_000_000
+        private const val VIDEO_SOCKET_BUFFER_BYTES = 256 * 1024
         private const val MAGIC = 0x415A3244 // AZ2D
         private const val HEADER_SIZE = 21
         private const val MAX_PAYLOAD = 1180
