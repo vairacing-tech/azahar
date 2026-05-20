@@ -2,7 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
-package dev.citra2device.receiver
+package dev.azahar.secondscreen
 
 import android.Manifest
 import android.app.Activity
@@ -69,9 +69,16 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        hideSystemUi()
         buildUi()
+        surfaceView.post { hideSystemUi() }
         intent?.data?.let { connect(it) }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemUi()
+        }
     }
 
     override fun onDestroy() {
@@ -132,16 +139,24 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun launchScanner() {
-        val options = ScanOptions()
-            .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-            .setPrompt("")
-            .setBeepEnabled(false)
-            .setOrientationLocked(false)
-        scanLauncher.launch(options)
+        try {
+            val options = ScanOptions()
+                .setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
+                .setPrompt("")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+            scanLauncher.launch(options)
+        } catch (e: Exception) {
+            toast(getString(R.string.connection_failed, e.message ?: "scanner unavailable"))
+        }
     }
 
     private fun connect(uri: Uri) {
-        val session = Session.from(uri)
+        val session = try {
+            Session.from(uri)
+        } catch (_: Exception) {
+            null
+        }
         if (session == null) {
             toast(getString(R.string.connection_failed, "invalid QR"))
             return
@@ -287,8 +302,9 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun hideSystemUi() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            window.insetsController?.hide(WindowInsets.Type.systemBars())
-            window.insetsController?.systemBarsBehavior =
+            val controller = window.decorView.windowInsetsController ?: return
+            controller.hide(WindowInsets.Type.systemBars())
+            controller.systemBarsBehavior =
                 WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         } else {
             @Suppress("DEPRECATION")

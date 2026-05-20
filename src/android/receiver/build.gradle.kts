@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.citra2device.receiver"
+    namespace = "dev.azahar.secondscreen"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.citra2device.receiver"
+        applicationId = "dev.azahar.secondscreen"
         minSdk = 29
         targetSdk = 35
         versionCode = 1

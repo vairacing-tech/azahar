@@ -7,7 +7,7 @@ Usar Azahar como base para que una Odin 2 Portal ejecute la emulacion de Nintend
 ## Arquitectura
 
 - Host: fork Android de Azahar.
-- Receptor: app Android nativa separada, paquete `dev.citra2device.receiver`.
+- Receptor: app Android nativa separada, paquete `dev.azahar.secondscreen`.
 - Emparejamiento: QR con URI `azahar2device://join?host=<ip>&control=<port>&video=<port>&token=<token>&screen=bottom`.
 - Control: TCP local con token de sesion, mensajes `HELLO`, `TOUCH`, `PING`, `STOP`.
 - Video: H.264 por UDP con fragmentacion propia y descarte de frames antiguos en el receptor.
