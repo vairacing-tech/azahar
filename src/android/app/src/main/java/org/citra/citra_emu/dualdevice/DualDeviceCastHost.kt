@@ -65,6 +65,7 @@ class DualDeviceCastHost(
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
     private var pairingDialog: Dialog? = null
+    private var castConfig = CastConfig.default()
     private var sequence = 0
 
     private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
@@ -164,21 +165,23 @@ class DualDeviceCastHost(
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
             val hello = reader.readLine() ?: throw IllegalStateException("Receiver disconnected")
             val parts = hello.trim().split(" ")
-            if (parts.size != 3 || parts[0] != "HELLO" || parts[1] != token) {
+            if (parts.size < 3 || parts[0] != "HELLO" || parts[1] != token) {
                 socket.getOutputStream().write("ERR auth\n".toByteArray())
                 throw IllegalArgumentException("Invalid receiver token")
             }
 
             receiverAddress = socket.inetAddress
             receiverVideoPort = parts[2].toInt()
-            socket.getOutputStream().write("OK $CAST_WIDTH $CAST_HEIGHT $CAST_FPS\n".toByteArray())
+            castConfig = CastConfig.fromReceiverRequest(parts.getOrNull(3), parts.getOrNull(4))
+            socket.getOutputStream()
+                .write("OK ${castConfig.width} ${castConfig.height} $CAST_FPS ${castConfig.aspectMode.protocolValue}\n".toByteArray())
             activity.runOnUiThread {
                 Toast.makeText(activity, R.string.dual_device_cast_connected, Toast.LENGTH_SHORT).show()
                 pairingDialog?.dismiss()
                 pairingDialog = null
             }
 
-            startEncoder()
+            startEncoder(castConfig)
             readControlMessages(reader)
         } catch (e: Exception) {
             if (running.get()) {
@@ -211,8 +214,8 @@ class DualDeviceCastHost(
     private fun handleTouch(parts: List<String>) {
         if (parts.size < 4) return
         val action = parts[1]
-        val x = (parts[2].toFloatOrNull() ?: return).coerceIn(0f, 1f) * CAST_WIDTH
-        val y = (parts[3].toFloatOrNull() ?: return).coerceIn(0f, 1f) * CAST_HEIGHT
+        val x = (parts[2].toFloatOrNull() ?: return).coerceIn(0f, 1f) * castConfig.width
+        val y = (parts[3].toFloatOrNull() ?: return).coerceIn(0f, 1f) * castConfig.height
         when (action) {
             "down" -> NativeLibrary.onSecondaryTouchEvent(x, y, true)
             "move" -> NativeLibrary.onSecondaryTouchMoved(x, y)
@@ -220,14 +223,14 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun startEncoder() {
+    private fun startEncoder(config: CastConfig) {
         val format = MediaFormat.createVideoFormat(
             MediaFormat.MIMETYPE_VIDEO_AVC,
-            CAST_WIDTH,
-            CAST_HEIGHT
+            config.width,
+            config.height
         ).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, CAST_BITRATE)
+            setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, CAST_FPS)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -398,11 +401,68 @@ class DualDeviceCastHost(
         }
     }
 
+    private enum class ReceiverAspectMode(val protocolValue: String) {
+        FourThree("4:3"),
+        SixteenNine("16:9"),
+        Fill("fill");
+
+        companion object {
+            fun fromProtocolValue(value: String?): ReceiverAspectMode {
+                return when (value?.lowercase(Locale.US)) {
+                    "16:9", "16:0", "16_9", "widescreen" -> SixteenNine
+                    "fill", "full" -> Fill
+                    else -> FourThree
+                }
+            }
+        }
+    }
+
+    private data class CastConfig(
+        val width: Int,
+        val height: Int,
+        val aspectMode: ReceiverAspectMode,
+    ) {
+        val bitrate: Int
+            get() {
+                val basePixels = BASE_TOUCH_WIDTH * BASE_TOUCH_HEIGHT * DEFAULT_MULTIPLIER * DEFAULT_MULTIPLIER
+                val scaledBitrate = BASE_BITRATE.toLong() * width * height / basePixels
+                return scaledBitrate.coerceIn(MIN_BITRATE.toLong(), MAX_BITRATE.toLong()).toInt()
+            }
+
+        companion object {
+            fun default(): CastConfig {
+                return fromReceiverRequest(DEFAULT_MULTIPLIER.toString(), ReceiverAspectMode.FourThree.protocolValue)
+            }
+
+            fun fromReceiverRequest(multiplierValue: String?, aspectValue: String?): CastConfig {
+                val multiplier = (multiplierValue?.toIntOrNull() ?: DEFAULT_MULTIPLIER)
+                    .coerceIn(MIN_MULTIPLIER, MAX_MULTIPLIER)
+                val aspectMode = ReceiverAspectMode.fromProtocolValue(aspectValue)
+                val height = BASE_TOUCH_HEIGHT * multiplier
+                val width = when (aspectMode) {
+                    ReceiverAspectMode.SixteenNine -> alignEven((height * 16 + 4) / 9)
+                    ReceiverAspectMode.FourThree,
+                    ReceiverAspectMode.Fill -> BASE_TOUCH_WIDTH * multiplier
+                }
+                return CastConfig(width, height, aspectMode)
+            }
+
+            private fun alignEven(value: Int): Int {
+                return if (value % 2 == 0) value else value + 1
+            }
+        }
+    }
+
     companion object {
-        private const val CAST_WIDTH = 640
-        private const val CAST_HEIGHT = 480
+        private const val BASE_TOUCH_WIDTH = 320
+        private const val BASE_TOUCH_HEIGHT = 240
+        private const val DEFAULT_MULTIPLIER = 2
+        private const val MIN_MULTIPLIER = 1
+        private const val MAX_MULTIPLIER = 4
         private const val CAST_FPS = 60
-        private const val CAST_BITRATE = 4_000_000
+        private const val BASE_BITRATE = 4_000_000
+        private const val MIN_BITRATE = 1_500_000
+        private const val MAX_BITRATE = 12_000_000
         private const val MAGIC = 0x415A3244 // AZ2D
         private const val HEADER_SIZE = 21
         private const val MAX_PAYLOAD = 1180

@@ -6,7 +6,9 @@ package dev.azahar.secondscreen
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.media.MediaCodec
 import android.media.MediaFormat
@@ -21,9 +23,12 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -47,9 +52,14 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val executor = Executors.newCachedThreadPool()
     private val running = AtomicBoolean(false)
-    private lateinit var surfaceView: SurfaceView
+    private val preferences: SharedPreferences by lazy {
+        getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+    }
+    private lateinit var surfaceView: AspectSurfaceView
     private lateinit var overlayView: LinearLayout
     private lateinit var statusText: TextView
+    private var selectedResolution = ResolutionMultiplier.X2
+    private var selectedAspectMode = AspectMode.FourThree
     private var decoder: MediaCodec? = null
     private var controlSocket: Socket? = null
     private var controlWriter: PrintWriter? = null
@@ -73,6 +83,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        loadSettings()
         buildUi()
         surfaceView.post { hideSystemUi() }
         intent?.data?.let { connect(it) }
@@ -115,6 +126,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             setBackgroundColor(0xFF000000.toInt())
         }
         surfaceView = AspectSurfaceView(this).apply {
+            aspectMode = selectedAspectMode
             holder.addCallback(this@MainActivity)
             keepScreenOn = true
             setOnTouchListener(::onTouch)
@@ -131,10 +143,33 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             setText(R.string.scan_qr)
             setOnClickListener { requestCameraThenScan() }
         }
+        val resolutionLabel = settingsLabel(R.string.resolution_multiplier)
+        val resolutionSpinner = settingsSpinner(
+            ResolutionMultiplier.entries.map { it.label },
+            ResolutionMultiplier.entries.indexOf(selectedResolution)
+        ) { position ->
+            selectedResolution = ResolutionMultiplier.entries[position]
+            saveSettings()
+        }
+        val aspectLabel = settingsLabel(R.string.aspect_mode)
+        val aspectSpinner = settingsSpinner(
+            AspectMode.entries.map { it.label },
+            AspectMode.entries.indexOf(selectedAspectMode)
+        ) { position ->
+            selectedAspectMode = AspectMode.entries[position]
+            surfaceView.aspectMode = selectedAspectMode
+            saveSettings()
+        }
         overlayView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
+            val padding = (16 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, padding)
             addView(statusText)
+            addView(resolutionLabel)
+            addView(resolutionSpinner)
+            addView(aspectLabel)
+            addView(aspectSpinner)
             addView(scanButton)
         }
         root.addView(
@@ -147,6 +182,42 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         )
         root.addView(overlayView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         setContentView(root)
+    }
+
+    private fun settingsLabel(textResId: Int): TextView {
+        return TextView(this).apply {
+            setText(textResId)
+            gravity = Gravity.CENTER
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+            setPadding(0, 18, 0, 4)
+        }
+    }
+
+    private fun settingsSpinner(
+        entries: List<String>,
+        selectedPosition: Int,
+        onSelected: (Int) -> Unit
+    ): Spinner {
+        val spinnerAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, entries).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        return Spinner(this).apply {
+            adapter = spinnerAdapter
+            setSelection(selectedPosition.coerceIn(entries.indices), false)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: View?,
+                    position: Int,
+                    id: Long
+                ) {
+                    onSelected(position)
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
     }
 
     private fun requestCameraThenScan() {
@@ -206,7 +277,10 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
             val writer = PrintWriter(socket.getOutputStream(), true)
             controlWriter = writer
-            writer.println("HELLO ${session.token} ${udp.localPort}")
+            writer.println(
+                "HELLO ${session.token} ${udp.localPort} " +
+                    "${selectedResolution.multiplier} ${selectedAspectMode.protocolValue}"
+            )
             val response = reader.readLine() ?: throw IllegalStateException("empty host response")
             val parts = response.split(" ")
             if (parts.size < 4 || parts[0] != "OK") {
@@ -340,6 +414,20 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
+    private fun loadSettings() {
+        val multiplier = preferences.getInt(KEY_RESOLUTION_MULTIPLIER, ResolutionMultiplier.X2.multiplier)
+        selectedResolution = ResolutionMultiplier.fromMultiplier(multiplier)
+        val aspect = preferences.getString(KEY_ASPECT_MODE, AspectMode.FourThree.protocolValue)
+        selectedAspectMode = AspectMode.fromProtocolValue(aspect)
+    }
+
+    private fun saveSettings() {
+        preferences.edit()
+            .putInt(KEY_RESOLUTION_MULTIPLIER, selectedResolution.multiplier)
+            .putString(KEY_ASPECT_MODE, selectedAspectMode.protocolValue)
+            .apply()
+    }
+
     private fun Closeable?.closeQuietly() {
         try {
             this?.close()
@@ -417,15 +505,59 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
+    private enum class ResolutionMultiplier(val multiplier: Int, val label: String) {
+        X1(1, "1x - 320x240"),
+        X2(2, "2x - 640x480"),
+        X3(3, "3x - 960x720"),
+        X4(4, "4x - 1280x960");
+
+        companion object {
+            fun fromMultiplier(multiplier: Int): ResolutionMultiplier {
+                return entries.firstOrNull { it.multiplier == multiplier } ?: X2
+            }
+        }
+    }
+
+    private enum class AspectMode(
+        val protocolValue: String,
+        val label: String,
+        val displayAspectRatio: Float?,
+    ) {
+        FourThree("4:3", "4:3", 4f / 3f),
+        SixteenNine("16:9", "16:9", 16f / 9f),
+        Fill("fill", "Fill", null);
+
+        companion object {
+            fun fromProtocolValue(value: String?): AspectMode {
+                return entries.firstOrNull { it.protocolValue.equals(value, ignoreCase = true) }
+                    ?: FourThree
+            }
+        }
+    }
+
     companion object {
-        private const val SCREEN_ASPECT_RATIO = 4f / 3f
+        private const val PREFERENCES_NAME = "azahar_second_screen"
+        private const val KEY_RESOLUTION_MULTIPLIER = "resolution_multiplier"
+        private const val KEY_ASPECT_MODE = "aspect_mode"
         private const val MAGIC = 0x415A3244
         private const val HEADER_SIZE = 21
         private const val FLAG_CONFIG = 2
     }
 
     private class AspectSurfaceView(context: android.content.Context) : SurfaceView(context) {
+        var aspectMode: AspectMode = AspectMode.FourThree
+            set(value) {
+                field = value
+                requestLayout()
+            }
+
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val targetAspectRatio = aspectMode.displayAspectRatio
+            if (targetAspectRatio == null) {
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+                return
+            }
+
             val availableWidth = MeasureSpec.getSize(widthMeasureSpec)
             val availableHeight = MeasureSpec.getSize(heightMeasureSpec)
             if (availableWidth == 0 || availableHeight == 0) {
@@ -436,12 +568,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             val availableAspect = availableWidth.toFloat() / availableHeight.toFloat()
             val measuredWidth: Int
             val measuredHeight: Int
-            if (availableAspect > SCREEN_ASPECT_RATIO) {
+            if (availableAspect > targetAspectRatio) {
                 measuredHeight = availableHeight
-                measuredWidth = (availableHeight * SCREEN_ASPECT_RATIO).toInt()
+                measuredWidth = (availableHeight * targetAspectRatio).toInt()
             } else {
                 measuredWidth = availableWidth
-                measuredHeight = (availableWidth / SCREEN_ASPECT_RATIO).toInt()
+                measuredHeight = (availableWidth / targetAspectRatio).toInt()
             }
             setMeasuredDimension(measuredWidth, measuredHeight)
         }
