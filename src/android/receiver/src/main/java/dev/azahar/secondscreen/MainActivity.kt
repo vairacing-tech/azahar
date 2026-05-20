@@ -47,10 +47,13 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val executor = Executors.newCachedThreadPool()
+    private val controlExecutor = Executors.newSingleThreadExecutor()
+    private val controlWriteLock = Any()
     private val running = AtomicBoolean(false)
     private val preferences: SharedPreferences by lazy {
         getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -105,6 +108,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     override fun onDestroy() {
         stopSession()
         executor.shutdownNow()
+        controlExecutor.shutdownNow()
         super.onDestroy()
     }
 
@@ -354,8 +358,11 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun readHostControl(reader: BufferedReader) {
-        while (running.get()) {
-            if (reader.readLine() == null) break
+        try {
+            while (running.get()) {
+                if (reader.readLine() == null) break
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -373,12 +380,27 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun sendTouch(action: String, x: Float, y: Float) {
-        controlWriter?.println("TOUCH $action $x $y")
+        sendControlLine("TOUCH $action $x $y")
+    }
+
+    private fun sendControlLine(line: String) {
+        val writer = controlWriter ?: return
+        try {
+            controlExecutor.execute {
+                try {
+                    synchronized(controlWriteLock) {
+                        writer.println(line)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+        }
     }
 
     private fun stopSession() {
         running.set(false)
-        controlWriter?.println("STOP")
+        sendControlLine("STOP")
         controlWriter = null
         controlSocket.closeQuietly()
         controlSocket = null

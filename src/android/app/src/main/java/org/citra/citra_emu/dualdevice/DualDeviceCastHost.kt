@@ -183,6 +183,7 @@ class DualDeviceCastHost(
 
             startEncoder(castConfig)
             readControlMessages(reader)
+            close()
         } catch (e: Exception) {
             if (running.get()) {
                 Log.error("[DualDeviceCastHost] ${e.message}")
@@ -290,22 +291,39 @@ class DualDeviceCastHost(
         val info = MediaCodec.BufferInfo()
         val codec = encoder ?: return
         while (running.get()) {
-            val index = codec.dequeueOutputBuffer(info, 10_000)
-            if (index < 0) continue
-            val buffer = codec.getOutputBuffer(index)
-            if (buffer != null && info.size > 0) {
-                buffer.position(info.offset)
-                buffer.limit(info.offset + info.size)
-                val data = ByteArray(info.size)
-                buffer.get(data)
-                val flags = when {
-                    info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 -> FLAG_CONFIG
-                    info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 -> FLAG_KEY_FRAME
-                    else -> FLAG_FRAME
-                }
-                sendVideoFrame(data, info.presentationTimeUs, flags)
+            val index = try {
+                codec.dequeueOutputBuffer(info, 10_000)
+            } catch (_: IllegalStateException) {
+                break
             }
-            codec.releaseOutputBuffer(index, false)
+            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
+            if (index < 0) continue
+            try {
+                val buffer = codec.getOutputBuffer(index)
+                if (buffer != null && info.size > 0) {
+                    buffer.position(info.offset)
+                    buffer.limit(info.offset + info.size)
+                    val data = ByteArray(info.size)
+                    buffer.get(data)
+                    val flags = when {
+                        info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 -> FLAG_CONFIG
+                        info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 -> FLAG_KEY_FRAME
+                        else -> FLAG_FRAME
+                    }
+                    sendVideoFrame(data, info.presentationTimeUs, flags)
+                }
+            } catch (e: Exception) {
+                if (running.get()) {
+                    Log.error("[DualDeviceCastHost] Encoder drain failed: ${e.message}")
+                    close()
+                }
+                break
+            } finally {
+                try {
+                    codec.releaseOutputBuffer(index, false)
+                } catch (_: Exception) {
+                }
+            }
         }
     }
 
@@ -328,7 +346,15 @@ class DualDeviceCastHost(
             packet.putShort(chunkCount.toShort())
             packet.put(data, offset, payloadSize)
             val bytes = packet.array()
-            socket.send(DatagramPacket(bytes, bytes.size, address, port))
+            try {
+                socket.send(DatagramPacket(bytes, bytes.size, address, port))
+            } catch (e: Exception) {
+                if (running.get()) {
+                    Log.error("[DualDeviceCastHost] Video send failed: ${e.message}")
+                    close()
+                }
+                return
+            }
             offset += payloadSize
         }
     }
