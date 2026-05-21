@@ -20,7 +20,14 @@ plugins {
  * next 680 years.
  */
 val autoVersion = (((System.currentTimeMillis() / 1000) - 1451606400) / 10).toInt()
-val abiFilter = listOf("arm64-v8a", "x86_64")
+val abiFilter = providers.gradleProperty("azaharAbiFilters")
+    .map { abiList ->
+        abiList.split(",")
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+    }
+    .orElse(listOf("arm64-v8a", "x86_64"))
+    .get()
 
 val downloadedJniLibsPath = "${layout.buildDirectory.get().asFile.path}/downloadedJniLibs"
 
@@ -211,6 +218,7 @@ dependencies {
     implementation("io.coil-kt:coil:2.7.0")
     implementation("org.ini4j:ini4j:0.5.4")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.2")
+    implementation("com.google.zxing:core:3.5.3")
 }
 
 // Download Vulkan Validation Layers from the KhronosGroup GitHub.

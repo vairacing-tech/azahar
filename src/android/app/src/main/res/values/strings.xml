@@ -985,4 +985,14 @@
     <string name="decompress_failed">Decompression failed.</string>
     <string name="compress_decompress_installed_app">Already installed applications cannot be compressed or decompressed.</string>
 
+    <!-- Dual device cast -->
+    <string name="dual_device_cast">Dual Device Cast</string>
+    <string name="dual_device_cast_pairing_title">Pair second screen</string>
+    <string name="dual_device_cast_pairing_message">Open the Azahar Second Screen app on the second Android device and scan this QR code.</string>
+    <string name="dual_device_cast_stop">Stop Dual Device Cast</string>
+    <string name="dual_device_cast_waiting">Waiting for receiver…</string>
+    <string name="dual_device_cast_connected">Receiver connected</string>
+    <string name="dual_device_cast_stopped">Dual Device Cast stopped</string>
+    <string name="dual_device_cast_error">Dual Device Cast error: %1$s</string>
+
 </resources>

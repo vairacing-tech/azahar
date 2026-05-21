@@ -2,10 +2,12 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <iomanip>
 #include <memory>
 #include <ranges>
 #include <sstream>
+#include <string_view>
 #include <unordered_map>
 #include <INIReader.h>
 #include <boost/hana/string.hpp>
@@ -339,9 +341,11 @@ void Config::Reload() {
     for (auto key = Settings::Keys::keys_array.begin(); key != Settings::Keys::keys_array.end();
          ++key) {
         const auto key_declaration_string = std::string(*key) + " =";
+        const auto is_omitted_key = std::ranges::any_of(
+            DefaultINI::android_config_omitted_keys,
+            [key](const auto omitted_key) { return std::string_view(omitted_key) == *key; });
         // FIXME: This code looks so ass when formatted by clang-format -OS
-        if (std::ranges::find(DefaultINI::android_config_omitted_keys, *key) ==
-                std::end(DefaultINI::android_config_omitted_keys) &&
+        if (!is_omitted_key &&
             std::string(DefaultINI::android_config_default_file_content)
                     .find(key_declaration_string) == std::string::npos) {
             ASSERT_MSG(false,
