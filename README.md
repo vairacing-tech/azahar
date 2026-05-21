@@ -2,10 +2,10 @@
 
 Fork de [Azahar](https://github.com/azahar-emu/azahar) para usar dos dispositivos Android como una Nintendo 3DS de dos pantallas:
 
-- Odin 2 Portal: ejecuta Azahar y muestra la pantalla superior.
-- Poco F5: ejecuta una app receptora y muestra la pantalla tactil inferior.
+- Android host: ejecuta Azahar y muestra la pantalla superior.
+- Android receiver: ejecuta una app receptora y muestra la pantalla tactil inferior.
 
-El objetivo es jugar en la Odin con la pantalla principal local y enviar la pantalla inferior al movil por red local con baja latencia, manteniendo el tactil del movil como entrada de la pantalla inferior.
+El objetivo es jugar en un dispositivo Android host con la pantalla principal local y enviar la pantalla inferior a otro dispositivo Android por red local con baja latencia, manteniendo el tactil del receiver como entrada de la pantalla inferior.
 
 ## Estado Actual
 
@@ -27,22 +27,22 @@ artifacts/azahar-host-vanilla-arm64-debug.apk
 artifacts/azahar-receiver-debug.apk
 ```
 
-Instalacion por ADB con los dispositivos usados en este proyecto:
+Instalacion por ADB:
 
 ```powershell
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s 2abd611e install -r -d artifacts\azahar-host-vanilla-arm64-debug.apk
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s b20085d2 install -r -d -g artifacts\azahar-receiver-debug.apk
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s <host-serial> install -r -d artifacts\azahar-host-vanilla-arm64-debug.apk
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s <receiver-serial> install -r -d -g artifacts\azahar-receiver-debug.apk
 ```
 
 ## Uso
 
-1. Conectar Odin y Poco a la misma Wi-Fi o hotspot local.
-2. Abrir Azahar en la Odin y cargar un juego.
+1. Conectar el Android host y el Android receiver a la misma Wi-Fi o hotspot local.
+2. Abrir Azahar en el host y cargar un juego.
 3. Activar `Dual Device Cast` desde el menu in-game.
-4. Abrir el receiver en el Poco.
+4. Abrir la app receiver en el segundo dispositivo Android.
 5. Elegir resolucion y formato en el receiver.
-6. Escanear el QR mostrado por la Odin.
-7. Usar el Poco como pantalla inferior tactil.
+6. Escanear el QR mostrado por el host.
+7. Usar el receiver como pantalla inferior tactil.
 
 ## Receiver
 
