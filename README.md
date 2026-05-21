@@ -71,7 +71,7 @@ Copy-Item .\app\build\outputs\apk\vanilla\debug\app-vanilla-debug.apk ..\..\arti
 
 ## Arquitectura
 
-- Host: `src/android/app/src/main/java/org/citra/citra_emu/dualdevice/DualDeviceCastHost.kt`
+- Host: `DualDeviceCastHost.kt`
 - Receiver: `src/android/receiver`
 - Plan tecnico: `docs/azahar-dual-device-plan.md`
 
@@ -83,11 +83,11 @@ El host usa el soporte de Azahar para `secondary_window`, `secondarySurfaceChang
 - Ajustar bitrate/FPS/resolucion segun rendimiento.
 - Validar Vulkan ademas de OpenGL.
 - Mejorar reconexion tras perdida de red o cierre del receiver.
-- Renombrar namespaces Android heredados de Citra en el host en una pasada dedicada.
+- Renombrar namespaces Android heredados en el host en una pasada dedicada.
 
 ## Upstream
 
-Este proyecto parte de Azahar, un emulador open-source de Nintendo 3DS basado en Citra. Para informacion general de Azahar, releases oficiales y requisitos upstream, consultar:
+Este proyecto parte de Azahar, un emulador open-source de Nintendo 3DS. Para informacion general de Azahar, releases oficiales y requisitos upstream, consultar:
 
 - https://github.com/azahar-emu/azahar
 - https://azahar-emu.org/
