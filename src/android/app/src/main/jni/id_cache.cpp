@@ -31,6 +31,7 @@ static jmethodID s_portrait_screen_layout;
 static jmethodID s_exit_emulation_activity;
 static jmethodID s_request_camera_permission;
 static jmethodID s_request_mic_permission;
+static jmethodID s_tv_audio_frame_callback;
 
 static jclass s_cheat_class;
 static jfieldID s_cheat_pointer;
@@ -106,6 +107,10 @@ jmethodID GetRequestCameraPermission() {
 
 jmethodID GetRequestMicPermission() {
     return s_request_mic_permission;
+}
+
+jmethodID GetTvAudioFrameCallback() {
+    return s_tv_audio_frame_callback;
 }
 
 jclass GetCheatClass() {
@@ -188,6 +193,8 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         env->GetStaticMethodID(s_native_library_class, "requestCameraPermission", "()Z");
     s_request_mic_permission =
         env->GetStaticMethodID(s_native_library_class, "requestMicPermission", "()Z");
+    s_tv_audio_frame_callback =
+        env->GetStaticMethodID(s_native_library_class, "onTvAudioFrame", "([SIII)V");
     env->DeleteLocalRef(native_library_class);
 
     // Initialize Cheat

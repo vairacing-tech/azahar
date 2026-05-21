@@ -1,22 +1,25 @@
 # Azahar Dual Device
 
-Fork de [Azahar](https://github.com/azahar-emu/azahar) para usar dos dispositivos Android como una Nintendo 3DS de dos pantallas:
+Fork de [Azahar](https://github.com/azahar-emu/azahar) para usar pantallas externas en red local con baja latencia.
 
-- Android host: ejecuta Azahar y muestra la pantalla superior.
-- Android receiver: ejecuta una app receptora y muestra la pantalla tactil inferior.
+Modos incluidos:
 
-El objetivo es jugar en un dispositivo Android host con la pantalla principal local y enviar la pantalla inferior a otro dispositivo Android por red local con baja latencia, manteniendo el tactil del receiver como entrada de la pantalla inferior.
+- `Dual Device Cast`: Android host ejecuta Azahar y muestra la pantalla superior; otro Android muestra la pantalla inferior tactil.
+- `TV Main Screen Cast`: Android host ejecuta Azahar, mantiene controles y pantalla inferior tactil local; una TV o navegador compatible muestra la pantalla superior por WebRTC.
 
 ## Estado Actual
 
 - Rama de trabajo: `azahar-dual-device`.
 - Host Android integrado en Azahar con menu in-game `Dual Device Cast`.
+- Host Android integrado en Azahar con menu in-game `TV Main Screen Cast`.
 - Receiver Android nativo separado: paquete `dev.azahar.secondscreen`.
-- Emparejamiento por QR con esquema `azahar2device://join`.
-- Video H.264 por UDP.
-- Control/tactil por TCP.
-- Encoder y decoder AVC por hardware con preferencia por codecs Qualcomm Snapdragon (`c2.qti.*` / `omx.qcom.*`).
-- Sin fallback a encoding software/CPU en el host.
+- Emparejamiento Android receiver por QR con esquema `azahar2device://join`.
+- Emparejamiento TV por URL local + PIN.
+- Video Android receiver: H.264 por UDP.
+- Video TV: WebRTC LAN, H.264 y encoder hardware mediante el SDK WebRTC Android.
+- Control/tactil Android receiver por TCP.
+- Audio TV configurable: `Host`, `TV`, `Both`.
+- Sin fallback a encoding software/CPU en los modos de cast del host.
 
 ## APKs Debug
 
@@ -36,6 +39,8 @@ Instalacion por ADB:
 
 ## Uso
 
+### Android Receiver
+
 1. Conectar el Android host y el Android receiver a la misma Wi-Fi o hotspot local.
 2. Abrir Azahar en el host y cargar un juego.
 3. Activar `Dual Device Cast` desde el menu in-game.
@@ -43,6 +48,16 @@ Instalacion por ADB:
 5. Elegir resolucion y formato en el receiver.
 6. Escanear el QR mostrado por el host.
 7. Usar el receiver como pantalla inferior tactil.
+
+### TV Main Screen
+
+1. Conectar el Android host y la TV o navegador receptor a la misma Wi-Fi o hotspot local.
+2. Abrir Azahar en el host y cargar un juego.
+3. Activar `TV Main Screen Cast` desde el menu in-game.
+4. En la TV, abrir la URL local mostrada por el host.
+5. Introducir el PIN mostrado por el host.
+6. El host queda con controles y pantalla inferior tactil local; la TV muestra la pantalla superior.
+7. Elegir el modo de audio en el dialog del host: `Host`, `TV` o `Both`.
 
 ## Receiver
 
@@ -72,16 +87,20 @@ Copy-Item .\app\build\outputs\apk\vanilla\debug\app-vanilla-debug.apk ..\..\arti
 ## Arquitectura
 
 - Host: `DualDeviceCastHost.kt`
+- Host TV: `TvMainScreenCastHost.kt`
 - Receiver: `src/android/receiver`
 - Plan tecnico: `docs/azahar-dual-device-plan.md`
 
 El host usa el soporte de Azahar para `secondary_window`, `secondarySurfaceChanged()` y eventos tactiles secundarios. Al activar cast, Azahar queda en `SINGLE_SCREEN` para la pantalla superior local y renderiza la pantalla inferior en una `Surface` de encoder H.264.
+
+En `TV Main Screen Cast`, Azahar queda temporalmente en `SINGLE_SCREEN` con `SWAP_SCREEN = true`, de forma que el host muestra la pantalla inferior local y la `Surface` secundaria recibe la pantalla superior. Esa `Surface` alimenta WebRTC mediante `SurfaceTextureHelper`, evitando readback CPU.
 
 ## Pendientes
 
 - Medir latencia real en Wi-Fi y hotspot local.
 - Ajustar bitrate/FPS/resolucion segun rendimiento.
 - Validar Vulkan ademas de OpenGL.
+- Validar `TV Main Screen Cast` en navegadores de Smart TV concretos; webOS queda como best-effort.
 - Mejorar reconexion tras perdida de red o cierre del receiver.
 - Renombrar namespaces Android heredados en el host en una pasada dedicada.
 

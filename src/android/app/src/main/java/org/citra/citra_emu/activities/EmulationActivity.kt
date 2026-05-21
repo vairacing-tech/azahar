@@ -35,6 +35,7 @@ import org.citra.citra_emu.camera.StillImageCameraHelper.OnFilePickerResult
 import org.citra.citra_emu.contracts.OpenFileResultContract
 import org.citra.citra_emu.databinding.ActivityEmulationBinding
 import org.citra.citra_emu.dualdevice.DualDeviceCastHost
+import org.citra.citra_emu.dualdevice.TvMainScreenCastHost
 import org.citra.citra_emu.display.ScreenAdjustmentUtil
 import org.citra.citra_emu.display.SecondaryDisplay
 import org.citra.citra_emu.features.hotkeys.HotkeyUtility
@@ -67,6 +68,7 @@ class EmulationActivity : AppCompatActivity() {
     private lateinit var hotkeyUtility: HotkeyUtility
     private lateinit var secondaryDisplay: SecondaryDisplay
     private var dualDeviceCastHost: DualDeviceCastHost? = null
+    private var tvMainScreenCastHost: TvMainScreenCastHost? = null
 
     private val onShutdown = Runnable {
         if (intent.getBooleanExtra("launched_from_shortcut", false)) {
@@ -190,7 +192,7 @@ class EmulationActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
-        if (dualDeviceCastHost?.isRunning != true) {
+        if (!isSecondaryCastRunning()) {
             secondaryDisplay.releasePresentation()
         }
         super.onStop()
@@ -203,7 +205,7 @@ class EmulationActivity : AppCompatActivity() {
 
     public override fun onRestart() {
         super.onRestart()
-        if (dualDeviceCastHost?.isRunning != true) {
+        if (!isSecondaryCastRunning()) {
             secondaryDisplay.updateDisplay()
         }
         NativeLibrary.reloadCameraDevices()
@@ -228,6 +230,8 @@ class EmulationActivity : AppCompatActivity() {
         NativeLibrary.playTimeManagerStop()
         dualDeviceCastHost?.close()
         dualDeviceCastHost = null
+        tvMainScreenCastHost?.close()
+        tvMainScreenCastHost = null
         isEmulationRunning = false
         instance = null
         secondaryDisplay.releasePresentation()
@@ -295,6 +299,8 @@ class EmulationActivity : AppCompatActivity() {
             dualDeviceCastHost = null
             return
         }
+        tvMainScreenCastHost?.close()
+        tvMainScreenCastHost = null
 
         try {
             val host = DualDeviceCastHost(
@@ -316,6 +322,40 @@ class EmulationActivity : AppCompatActivity() {
     }
 
     fun isDualDeviceCastRunning(): Boolean = dualDeviceCastHost?.isRunning == true
+
+    fun toggleTvMainScreenCast() {
+        val currentHost = tvMainScreenCastHost
+        if (currentHost?.isRunning == true) {
+            currentHost.close()
+            tvMainScreenCastHost = null
+            return
+        }
+        dualDeviceCastHost?.close()
+        dualDeviceCastHost = null
+
+        try {
+            val host = TvMainScreenCastHost(
+                activity = this,
+                settings = settingsViewModel.settings,
+                releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
+                restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() }
+            )
+            host.start()
+            tvMainScreenCastHost = host
+            host.showPairingDialog()
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                getString(R.string.tv_main_screen_cast_error, e.message ?: "unknown"),
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    fun isTvMainScreenCastRunning(): Boolean = tvMainScreenCastHost?.isRunning == true
+
+    private fun isSecondaryCastRunning(): Boolean =
+        dualDeviceCastHost?.isRunning == true || tvMainScreenCastHost?.isRunning == true
 
     private fun enableFullscreenImmersive() {
         val attributes = window.attributes

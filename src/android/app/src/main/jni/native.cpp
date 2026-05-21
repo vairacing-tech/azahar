@@ -413,6 +413,39 @@ void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceDestroyed(
     LOG_INFO(Frontend, "Secondary Surface Destroyed");
 }
 
+void Java_org_citra_citra_1emu_NativeLibrary_setTvAudioTapEnabled(
+    [[maybe_unused]] JNIEnv* env, [[maybe_unused]] jobject obj, jboolean enabled) {
+    if (!enabled) {
+        AudioCore::SetOutputAudioTap(nullptr);
+        return;
+    }
+
+    AudioCore::SetOutputAudioTap(
+        [](const s16* samples, std::size_t frames, int sample_rate, int channels) {
+            JNIEnv* env = IDCache::GetEnvForThread();
+            const auto sample_count = static_cast<jsize>(frames * channels);
+            jshortArray java_samples = env->NewShortArray(sample_count);
+            if (!java_samples) {
+                return;
+            }
+            env->SetShortArrayRegion(java_samples, 0, sample_count,
+                                     reinterpret_cast<const jshort*>(samples));
+            env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(),
+                                      IDCache::GetTvAudioFrameCallback(), java_samples,
+                                      static_cast<jint>(sample_rate), static_cast<jint>(channels),
+                                      static_cast<jint>(frames));
+            env->DeleteLocalRef(java_samples);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        });
+}
+
+void Java_org_citra_citra_1emu_NativeLibrary_setTvAudioLocalMute(
+    [[maybe_unused]] JNIEnv* env, [[maybe_unused]] jobject obj, jboolean muted) {
+    AudioCore::SetOutputAudioLocalMute(muted);
+}
+
 void Java_org_citra_citra_1emu_NativeLibrary_surfaceDestroyed([[maybe_unused]] JNIEnv* env,
                                                               [[maybe_unused]] jobject obj) {
     if (s_surface != nullptr) {

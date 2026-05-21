@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <span>
 #include <boost/serialization/access.hpp>
@@ -25,6 +27,12 @@ namespace AudioCore {
 
 class Sink;
 enum class SinkType : u32;
+
+using OutputAudioTap = std::function<void(const s16* samples, std::size_t frames, int sample_rate,
+                                          int channels)>;
+
+void SetOutputAudioTap(OutputAudioTap callback);
+void SetOutputAudioLocalMute(bool muted);
 
 class DspInterface {
 public:

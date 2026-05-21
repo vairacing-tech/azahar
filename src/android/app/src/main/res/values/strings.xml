@@ -994,5 +994,18 @@
     <string name="dual_device_cast_connected">Receiver connected</string>
     <string name="dual_device_cast_stopped">Dual Device Cast stopped</string>
     <string name="dual_device_cast_error">Dual Device Cast error: %1$s</string>
+    <string name="tv_main_screen_cast">TV Main Screen Cast</string>
+    <string name="tv_main_screen_cast_stop">Stop TV Main Screen Cast</string>
+    <string name="tv_main_screen_cast_pairing_title">TV main screen</string>
+    <string name="tv_main_screen_cast_pairing_message">Open this URL on the TV browser:</string>
+    <string name="tv_main_screen_cast_pin">PIN: %1$s</string>
+    <string name="tv_main_screen_cast_waiting">Waiting for TV...</string>
+    <string name="tv_main_screen_cast_connected">TV connected</string>
+    <string name="tv_main_screen_cast_stopped">TV Main Screen Cast stopped</string>
+    <string name="tv_main_screen_cast_error">TV Main Screen Cast error: %1$s</string>
+    <string name="tv_main_screen_cast_audio_mode">Audio output</string>
+    <string name="tv_main_screen_cast_audio_host">Host</string>
+    <string name="tv_main_screen_cast_audio_tv">TV</string>
+    <string name="tv_main_screen_cast_audio_both">Both</string>
 
 </resources>
