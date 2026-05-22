@@ -56,6 +56,7 @@ protected:
 protected:
     ANativeWindow* render_window{};
     ANativeWindow* host_window{};
+    bool surface_changed_pending{};
 
     int window_width{};
     int window_height{};

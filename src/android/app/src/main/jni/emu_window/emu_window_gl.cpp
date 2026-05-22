@@ -186,17 +186,22 @@ std::unique_ptr<Frontend::GraphicsContext> EmuWindow_Android_OpenGL::CreateShare
 }
 
 void EmuWindow_Android_OpenGL::PollEvents() {
-    if (!render_window) {
+    if (!surface_changed_pending) {
         return;
     }
 
     host_window = render_window;
     render_window = nullptr;
+    surface_changed_pending = false;
 
     DestroyWindowSurface();
-    CreateWindowSurface();
-    OnFramebufferSizeChanged();
-    presenting_state = PresentingState::Initial;
+    if (host_window) {
+        CreateWindowSurface();
+        OnFramebufferSizeChanged();
+        presenting_state = PresentingState::Initial;
+    } else {
+        presenting_state = PresentingState::Stopped;
+    }
 }
 
 void EmuWindow_Android_OpenGL::StopPresenting() {

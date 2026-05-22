@@ -67,9 +67,8 @@ android {
     }
 
     defaultConfig {
-        // The application ID refers to Lime3DS to allow for
-        // the Play Store listing, which was originally set up for Lime3DS, to still be used.
-        applicationId = "org.azahar_emu.azahar"
+        // Keep this fork installable alongside upstream Azahar.
+        applicationId = "org.azahar2s.azahar"
         minSdk = 29
         targetSdk = 35
         versionCode = autoVersion
@@ -180,7 +179,7 @@ android {
         register("googlePlay") {
             dimension = "version"
             versionNameSuffix = "-googleplay"
-            applicationId = "io.github.lime3ds.android"
+            applicationId = "org.azahar2s.azahar.googleplay"
         }
     }
 

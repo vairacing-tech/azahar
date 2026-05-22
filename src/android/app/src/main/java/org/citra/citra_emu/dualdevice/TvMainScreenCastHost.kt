@@ -5,7 +5,12 @@
 package org.citra.citra_emu.dualdevice
 
 import android.app.Dialog
+import androidx.appcompat.app.AlertDialog
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Base64
@@ -13,6 +18,7 @@ import android.view.Surface
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -20,6 +26,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
 import java.net.Inet4Address
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
@@ -32,8 +39,11 @@ import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import org.citra.citra_emu.NativeLibrary
 import org.citra.citra_emu.R
 import org.citra.citra_emu.activities.EmulationActivity
@@ -46,14 +56,20 @@ import org.citra.citra_emu.features.settings.utils.SettingsFile
 import org.citra.citra_emu.utils.EmulationMenuSettings
 import org.citra.citra_emu.utils.Log
 import org.json.JSONObject
+import org.webrtc.AudioSource
+import org.webrtc.AudioTrack
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
-import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
+import org.webrtc.HardwareVideoEncoderFactory
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
+import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.Predicate
+import org.webrtc.RtpParameters
+import org.webrtc.RtpSender
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -64,39 +80,62 @@ import org.webrtc.VideoEncoderFactory
 import org.webrtc.VideoSink
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.audio.AudioDeviceModule
+import org.webrtc.audio.JavaAudioDeviceModule
 
 class TvMainScreenCastHost(
     private val activity: EmulationActivity,
     private val settings: Settings,
     private val releaseSecondaryDisplay: () -> Unit,
     private val restoreSecondaryDisplay: () -> Unit,
+    private val protectNativeSurface: Boolean = false,
+    private val onStopped: () -> Unit = {},
 ) : Closeable {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newCachedThreadPool()
+    private val signalingExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val audioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val cleanupExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val running = AtomicBoolean(false)
-    private val pin = "%06d".format(SecureRandom().nextInt(1_000_000))
+    private val pin = "%04d".format(SecureRandom().nextInt(10_000))
     private val peerLock = Any()
     private val pendingAudioTasks = AtomicInteger(0)
+    private val capturedVideoFrames = AtomicInteger(0)
     private val audioResampler = Pcm16Resampler(NATIVE_SAMPLE_RATE, WEB_AUDIO_SAMPLE_RATE)
+    private val opusAudioQueueLock = Object()
+    private val opusAudioQueue = ArrayDeque<ByteArray>()
 
     private var serverSocket: ServerSocket? = null
     private var webSocket: WebSocketConnection? = null
     private var pairingDialog: Dialog? = null
     private var statusText: TextView? = null
+    private var startGameButton: TextView? = null
+    private var onStartGame: (() -> Unit)? = null
+    private var onCancelBeforeGame: (() -> Unit)? = null
+    private val gameStartRequested = AtomicBoolean(false)
     private var audioMode = AudioMode.Host
+    private var audioCodec = AudioCodec.Pcm
+    private var videoConfig = TvVideoConfig.default()
 
     private var eglBase: EglBase? = null
     private var peerConnectionFactory: PeerConnectionFactory? = null
+    private var audioDeviceModule: AudioDeviceModule? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
     private var captureSurface: Surface? = null
     private var videoSource: VideoSource? = null
     private var videoTrack: VideoTrack? = null
+    private var audioSource: AudioSource? = null
+    private var audioTrack: AudioTrack? = null
     private var peerConnection: PeerConnection? = null
+    private var videoSender: RtpSender? = null
+    private var audioSender: RtpSender? = null
     private var audioDataChannel: DataChannel? = null
+    private var opusCurrentChunk: ByteArray? = null
+    private var opusCurrentOffset = 0
 
     private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
     private val previousSecondaryLayout = IntSetting.SECONDARY_DISPLAY_LAYOUT.int
+    private val previousAspectRatio = IntSetting.ASPECT_RATIO.int
     private val previousSwapScreen = BooleanSetting.SWAP_SCREEN.boolean
     private val previousMenuSwapScreen = EmulationMenuSettings.swapScreens
 
@@ -109,7 +148,10 @@ class TvMainScreenCastHost(
         }
 
         try {
-            serverSocket = ServerSocket(0)
+            serverSocket = ServerSocket().apply {
+                reuseAddress = true
+                bind(InetSocketAddress(TV_CAST_HTTP_PORT))
+            }
             applyCastLayout()
             startWebRtcCapture()
             NativeLibrary.setTvAudioFrameCallback { samples, sampleRate, channels, frames ->
@@ -122,7 +164,14 @@ class TvMainScreenCastHost(
         }
     }
 
-    fun showPairingDialog() {
+    fun showPairingDialog(
+        onStartGame: (() -> Unit)? = null,
+        onCancelBeforeGame: (() -> Unit)? = null,
+    ) {
+        this.onStartGame = onStartGame
+        this.onCancelBeforeGame = onCancelBeforeGame
+        gameStartRequested.set(false)
+        startGameButton = null
         val density = activity.resources.displayMetrics.density
         val content = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -145,6 +194,63 @@ class TvMainScreenCastHost(
             setPadding(0, (16 * density).toInt(), 0, (12 * density).toInt())
         })
         content.addView(TextView(activity).apply {
+            setText(R.string.tv_main_screen_cast_resolution)
+        })
+        content.addView(RadioGroup(activity).apply {
+            orientation = RadioGroup.HORIZONTAL
+            TvVideoResolution.entries.forEachIndexed { index, resolution ->
+                addView(RadioButton(activity).apply {
+                    id = RESOLUTION_RADIO_BASE_ID + index
+                    text = activity.getString(resolution.labelResId)
+                    isChecked = resolution == videoConfig.resolution
+                })
+            }
+            setOnCheckedChangeListener { _, checkedId ->
+                val index = checkedId - RESOLUTION_RADIO_BASE_ID
+                if (index in TvVideoResolution.entries.indices) {
+                    setVideoResolution(TvVideoResolution.entries[index])
+                }
+            }
+        })
+        content.addView(TextView(activity).apply {
+            setText(R.string.tv_main_screen_cast_aspect)
+        })
+        content.addView(RadioGroup(activity).apply {
+            orientation = RadioGroup.HORIZONTAL
+            TvVideoAspectMode.entries.forEachIndexed { index, aspectMode ->
+                addView(RadioButton(activity).apply {
+                    id = ASPECT_RADIO_BASE_ID + index
+                    text = activity.getString(aspectMode.labelResId)
+                    isChecked = aspectMode == videoConfig.aspectMode
+                })
+            }
+            setOnCheckedChangeListener { _, checkedId ->
+                val index = checkedId - ASPECT_RADIO_BASE_ID
+                if (index in TvVideoAspectMode.entries.indices) {
+                    setVideoAspectMode(TvVideoAspectMode.entries[index])
+                }
+            }
+        })
+        content.addView(TextView(activity).apply {
+            setText(R.string.tv_main_screen_cast_bitrate)
+        })
+        content.addView(RadioGroup(activity).apply {
+            orientation = RadioGroup.HORIZONTAL
+            TvVideoBitrate.entries.forEachIndexed { index, bitrate ->
+                addView(RadioButton(activity).apply {
+                    id = BITRATE_RADIO_BASE_ID + index
+                    text = activity.getString(bitrate.labelResId)
+                    isChecked = bitrate == videoConfig.bitrate
+                })
+            }
+            setOnCheckedChangeListener { _, checkedId ->
+                val index = checkedId - BITRATE_RADIO_BASE_ID
+                if (index in TvVideoBitrate.entries.indices) {
+                    setVideoBitrate(TvVideoBitrate.entries[index])
+                }
+            }
+        })
+        content.addView(TextView(activity).apply {
             setText(R.string.tv_main_screen_cast_audio_mode)
         })
         content.addView(RadioGroup(activity).apply {
@@ -163,6 +269,25 @@ class TvMainScreenCastHost(
                 }
             }
         })
+        content.addView(TextView(activity).apply {
+            setText(R.string.tv_main_screen_cast_audio_codec)
+        })
+        content.addView(RadioGroup(activity).apply {
+            orientation = RadioGroup.HORIZONTAL
+            AudioCodec.entries.forEachIndexed { index, codec ->
+                addView(RadioButton(activity).apply {
+                    id = AUDIO_CODEC_RADIO_BASE_ID + index
+                    text = activity.getString(codec.labelResId)
+                    isChecked = codec == audioCodec
+                })
+            }
+            setOnCheckedChangeListener { _, checkedId ->
+                val index = checkedId - AUDIO_CODEC_RADIO_BASE_ID
+                if (index in AudioCodec.entries.indices) {
+                    setAudioCodec(AudioCodec.entries[index])
+                }
+            }
+        })
         statusText = TextView(activity).apply {
             setText(R.string.tv_main_screen_cast_waiting)
             textAlignment = TextView.TEXT_ALIGNMENT_CENTER
@@ -172,10 +297,31 @@ class TvMainScreenCastHost(
 
         pairingDialog = MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.tv_main_screen_cast_pairing_title)
-            .setView(content)
-            .setNegativeButton(android.R.string.cancel) { _, _ -> close() }
-            .setOnCancelListener { close() }
+            .setView(ScrollView(activity).apply { addView(content) })
+            .apply {
+                if (onStartGame != null) {
+                    setPositiveButton(R.string.tv_main_screen_cast_start_game, null)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> handlePairingCancel() }
+            .setOnCancelListener { handlePairingCancel() }
             .show()
+
+        if (onStartGame != null) {
+            (pairingDialog as? AlertDialog)
+                ?.getButton(AlertDialog.BUTTON_POSITIVE)
+                ?.also { startGameButton = it }
+                ?.setOnClickListener {
+                    if (!gameStartRequested.compareAndSet(false, true)) {
+                        return@setOnClickListener
+                    }
+                    it.isEnabled = false
+                    (it as? TextView)?.setText(R.string.tv_main_screen_cast_game_started)
+                    setStatus(R.string.tv_main_screen_cast_waiting)
+                    onStartGame()
+                    dismissPairingDialog()
+                }
+        }
     }
 
     private fun pairingUrl(): String = "http://${findLocalIpv4Address()}:${serverSocket?.localPort ?: 0}/tv"
@@ -185,9 +331,11 @@ class TvMainScreenCastHost(
         BooleanSetting.SWAP_SCREEN.boolean = true
         EmulationMenuSettings.swapScreens = true
         IntSetting.SECONDARY_DISPLAY_LAYOUT.int = SecondaryDisplayLayout.TOP_SCREEN.int
+        IntSetting.ASPECT_RATIO.int = videoConfig.aspectMode.aspectRatioSetting
         settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(BooleanSetting.SWAP_SCREEN, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.ASPECT_RATIO, SettingsFile.FILE_NAME_CONFIG)
         NativeLibrary.reloadSettings()
         NativeLibrary.swapScreens(true, activity.windowManager.defaultDisplay.rotation)
         NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
@@ -199,9 +347,11 @@ class TvMainScreenCastHost(
         BooleanSetting.SWAP_SCREEN.boolean = previousSwapScreen
         EmulationMenuSettings.swapScreens = previousMenuSwapScreen
         IntSetting.SECONDARY_DISPLAY_LAYOUT.int = previousSecondaryLayout
+        IntSetting.ASPECT_RATIO.int = previousAspectRatio
         settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(BooleanSetting.SWAP_SCREEN, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.ASPECT_RATIO, SettingsFile.FILE_NAME_CONFIG)
         NativeLibrary.reloadSettings()
         NativeLibrary.swapScreens(previousSwapScreen, activity.windowManager.defaultDisplay.rotation)
         NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
@@ -211,27 +361,56 @@ class TvMainScreenCastHost(
         ensurePeerConnectionFactoryInitialized(activity.applicationContext)
         val egl = EglBase.create()
         eglBase = egl
+        val codecPolicy = H264HardwareCodecPolicy()
         val encoderFactory = H264OnlyVideoEncoderFactory(
-            DefaultVideoEncoderFactory(egl.eglBaseContext, true, false)
+            HardwareVideoEncoderFactory(egl.eglBaseContext, true, false, codecPolicy)
         )
+        if (!codecPolicy.hasAllowedAvcEncoder) {
+            throw IllegalStateException("No hardware H.264 encoder available for TV cast")
+        }
+        val audioModule = JavaAudioDeviceModule.builder(activity.applicationContext)
+            .setUseLowLatency(true)
+            .setUseStereoInput(true)
+            .setUseStereoOutput(true)
+            .setInputSampleRate(WEB_AUDIO_SAMPLE_RATE)
+            .setOutputSampleRate(WEB_AUDIO_SAMPLE_RATE)
+            .setAudioBufferCallback { buffer, _, channelCount, sampleRate, bytesRead, captureTimeNs ->
+                fillWebRtcOpusAudioBuffer(buffer, channelCount, sampleRate, bytesRead)
+                captureTimeNs
+            }
+            .createAudioDeviceModule()
+        audioModule.setAudioRecordEnabled(false)
+        audioDeviceModule = audioModule
         val factory = PeerConnectionFactory.builder()
+            .setAudioDeviceModule(audioModule)
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
             .createPeerConnectionFactory()
         peerConnectionFactory = factory
 
         val source = factory.createVideoSource(false)
+        source.setIsScreencast(true)
+        source.adaptOutputFormat(videoConfig.width, videoConfig.height, CAST_FPS)
         videoSource = source
         val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
         track.setEnabled(true)
         videoTrack = track
+        val createdAudioSource = factory.createAudioSource(MediaConstraints())
+        audioSource = createdAudioSource
+        audioTrack = factory.createAudioTrack(AUDIO_TRACK_ID, createdAudioSource).apply {
+            setEnabled(false)
+        }
 
         val textureHelper = SurfaceTextureHelper.create("AzaharTvMainScreen", egl.eglBaseContext)
             ?: throw IllegalStateException("Unable to create WebRTC texture helper")
-        textureHelper.setTextureSize(TOP_SCREEN_WIDTH, TOP_SCREEN_HEIGHT)
+        textureHelper.setTextureSize(videoConfig.width, videoConfig.height)
         surfaceTextureHelper = textureHelper
         source.capturerObserver.onCapturerStarted(true)
         textureHelper.startListening(VideoSink { frame ->
+            if (capturedVideoFrames.incrementAndGet() == 1) {
+                Log.info("[TvMainScreenCastHost] First video frame captured")
+                sendStatus("video_started")
+            }
             source.capturerObserver.onFrameCaptured(frame)
         })
         captureSurface = Surface(textureHelper.surfaceTexture)
@@ -256,6 +435,7 @@ class TvMainScreenCastHost(
                 val input = BufferedInputStream(client.getInputStream())
                 val output = BufferedOutputStream(client.getOutputStream())
                 val request = readHttpRequest(input) ?: return
+                Log.info("[TvMainScreenCastHost] HTTP ${request.path}")
                 when {
                     request.path == "/" || request.path == "/tv" -> serveTvPage(output)
                     request.path == "/favicon.ico" -> serveNoContent(output)
@@ -300,14 +480,19 @@ class TvMainScreenCastHost(
 
         socket.soTimeout = 0
         val connection = WebSocketConnection(socket, input, output)
+        Log.info("[TvMainScreenCastHost] TV signaling connected")
+        val previousConnection = synchronized(peerLock) {
+            val previous = webSocket
+            webSocket = null
+            previous
+        }
+        previousConnection?.closeQuietly()
+        closePeerConnection()
         synchronized(peerLock) {
-            webSocket?.closeQuietly()
-            closePeerConnectionLocked()
             webSocket = connection
-            createPeerConnectionLocked()
         }
         setStatus(R.string.tv_main_screen_cast_connected)
-        sendStatus("connected")
+        sendStatus("signal_connected")
         mainHandler.post {
             Toast.makeText(activity, R.string.tv_main_screen_cast_connected, Toast.LENGTH_SHORT).show()
         }
@@ -315,22 +500,34 @@ class TvMainScreenCastHost(
         try {
             while (running.get()) {
                 val message = connection.readTextFrame() ?: break
+                Log.debug("[TvMainScreenCastHost] TV signal message received")
                 handleSignalMessage(message)
             }
         } finally {
-            synchronized(peerLock) {
+            Log.warning("[TvMainScreenCastHost] TV signaling closed")
+            val shouldClosePeer = synchronized(peerLock) {
                 if (webSocket === connection) {
                     webSocket = null
-                    closePeerConnectionLocked()
-                    if (running.get()) {
-                        setStatus(R.string.tv_main_screen_cast_waiting)
-                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            if (shouldClosePeer) {
+                closePeerConnection()
+                if (running.get()) {
+                    setStatus(R.string.tv_main_screen_cast_waiting)
                 }
             }
         }
     }
 
-    private fun createPeerConnectionLocked() {
+    private fun ensurePeerConnection(): PeerConnection {
+        synchronized(peerLock) { peerConnection }?.let { return it }
+        return createPeerConnection()
+    }
+
+    private fun createPeerConnection(): PeerConnection {
         val factory = peerConnectionFactory ?: throw IllegalStateException("WebRTC not initialized")
         val config = PeerConnection.RTCConfiguration(emptyList<PeerConnection.IceServer>()).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -367,12 +564,11 @@ class TvMainScreenCastHost(
             ) = Unit
         }) ?: throw IllegalStateException("Unable to create WebRTC peer connection")
 
-        val track = videoTrack ?: throw IllegalStateException("Video track unavailable")
-        val transceiverInit = RtpTransceiver.RtpTransceiverInit(
-            RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
-        )
-        connection.addTransceiver(track, transceiverInit)
-        peerConnection = connection
+        synchronized(peerLock) {
+            peerConnection = connection
+        }
+        updateAudioRouting()
+        return connection
     }
 
     private fun handleSignalMessage(message: String) {
@@ -383,12 +579,33 @@ class TvMainScreenCastHost(
             return
         }
         when (json.optString("type")) {
-            "hello" -> sendStatus("ready")
-            "offer" -> handleOffer(json.optString("sdp"))
+            "hello" -> {
+                Log.info("[TvMainScreenCastHost] TV hello")
+                applyClientConfig(json)
+                ensurePeerConnection()
+                sendStatus("ready")
+            }
+            "offer" -> {
+                Log.info("[TvMainScreenCastHost] TV offer")
+                handleOffer(json.optString("sdp"))
+            }
             "ice" -> handleRemoteIce(json)
-            "stop" -> close()
+            "stop" -> {
+                Log.info("[TvMainScreenCastHost] TV requested stop")
+                requestStop()
+            }
             else -> sendSignalError("Unsupported signaling message")
         }
+    }
+
+    private fun applyClientConfig(json: JSONObject) {
+        AudioMode.fromProtocolValue(json.optString("audioMode").takeIf { json.has("audioMode") })?.let {
+            audioMode = it
+        }
+        AudioCodec.fromProtocolValue(json.optString("audioCodec").takeIf { json.has("audioCodec") })?.let {
+            audioCodec = it
+        }
+        updateAudioRouting()
     }
 
     private fun handleOffer(sdp: String) {
@@ -396,36 +613,53 @@ class TvMainScreenCastHost(
             sendSignalError("This TV browser did not offer H.264 video.")
             return
         }
-        val connection = synchronized(peerLock) { peerConnection } ?: return
+        if (shouldUseWebRtcOpusAudio() && !sdp.contains("opus/48000", ignoreCase = true)) {
+            sendSignalError("This TV browser did not offer Opus audio.")
+            return
+        }
+        val connection = ensurePeerConnection()
         val offer = SessionDescription(SessionDescription.Type.OFFER, sdp)
         connection.setRemoteDescription(
             SimpleSdpObserver(
                 onSetSuccess = {
-                    connection.createAnswer(
-                        SimpleSdpObserver(
-                            onCreateSuccess = { answer ->
-                                val localAnswer = SessionDescription(
-                                    answer.type,
-                                    preferH264Sdp(answer.description)
-                                )
-                                connection.setLocalDescription(
-                                    SimpleSdpObserver(
-                                        onSetSuccess = {
-                                            sendJson(
-                                                JSONObject()
-                                                    .put("type", "answer")
-                                                    .put("sdp", localAnswer.description)
-                                            )
-                                        },
-                                        onFailure = ::sendSignalError
-                                    ),
-                                    localAnswer
-                                )
-                            },
-                            onFailure = ::sendSignalError
-                        ),
-                        MediaConstraints()
-                    )
+                    if (configureMediaTransceiversForAnswer(connection)) {
+                        connection.createAnswer(
+                            SimpleSdpObserver(
+                                onCreateSuccess = { answer ->
+                                    val localAnswer = SessionDescription(
+                                        answer.type,
+                                        preferH264Sdp(answer.description)
+                                    )
+                                    connection.setLocalDescription(
+                                        SimpleSdpObserver(
+                                            onSetSuccess = {
+                                                Log.info("[TvMainScreenCastHost] TV answer sent")
+                                                sendJson(
+                                                    JSONObject()
+                                                        .put("type", "answer")
+                                                        .put("sdp", localAnswer.description)
+                                                )
+                                                updateVideoSenderParameters()
+                                                sendStatus("connected")
+                                                mainHandler.post {
+                                                    if (onStartGame != null && !gameStartRequested.get()) {
+                                                        statusText?.setText(R.string.tv_main_screen_cast_ready_to_start)
+                                                        startGameButton?.isEnabled = true
+                                                    } else {
+                                                        dismissPairingDialog()
+                                                    }
+                                                }
+                                            },
+                                            onFailure = ::sendSignalError
+                                        ),
+                                        localAnswer
+                                    )
+                                },
+                                onFailure = ::sendSignalError
+                            ),
+                            MediaConstraints()
+                        )
+                    }
                 },
                 onFailure = ::sendSignalError
             ),
@@ -442,6 +676,54 @@ class TvMainScreenCastHost(
             candidate
         )
         synchronized(peerLock) { peerConnection }?.addIceCandidate(iceCandidate)
+    }
+
+    private fun configureMediaTransceiversForAnswer(connection: PeerConnection): Boolean {
+        val track = videoTrack ?: run {
+            sendSignalError("Video track unavailable on Android host.")
+            return false
+        }
+        val videoTransceiver = connection.transceivers.firstOrNull {
+            !it.isStopped && it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO
+        } ?: run {
+            sendSignalError("TV offer did not include a video receiver.")
+            return false
+        }
+        videoTransceiver.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY)
+        if (!videoTransceiver.sender.setTrack(track, false)) {
+            sendSignalError("Could not attach TV video track.")
+            return false
+        }
+
+        var createdAudioSender: RtpSender? = null
+        val audioTransceiver = connection.transceivers.firstOrNull {
+            !it.isStopped && it.mediaType == MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO
+        }
+        if (shouldUseWebRtcOpusAudio()) {
+            val opusTrack = audioTrack ?: run {
+                sendSignalError("Audio track unavailable on Android host.")
+                return false
+            }
+            if (audioTransceiver == null) {
+                sendSignalError("TV offer did not include an Opus audio receiver.")
+                return false
+            }
+            audioTransceiver.setDirection(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY)
+            if (!audioTransceiver.sender.setTrack(opusTrack, false)) {
+                sendSignalError("Could not attach TV audio track.")
+                return false
+            }
+            createdAudioSender = audioTransceiver.sender
+        } else {
+            audioTransceiver?.setDirection(RtpTransceiver.RtpTransceiverDirection.INACTIVE)
+        }
+
+        synchronized(peerLock) {
+            videoSender = videoTransceiver.sender
+            audioSender = createdAudioSender
+        }
+        updateAudioRouting()
+        return true
     }
 
     private fun registerAudioDataChannel(channel: DataChannel) {
@@ -461,18 +743,108 @@ class TvMainScreenCastHost(
         updateAudioRouting()
     }
 
+    private fun setVideoResolution(resolution: TvVideoResolution) {
+        videoConfig = videoConfig.copy(resolution = resolution)
+        applyVideoConfig()
+        sendStatus("video_resolution_${resolution.protocolValue}")
+    }
+
+    fun onEmulationStarted() {
+        if (protectNativeSurface) {
+            Log.info("[TvMainScreenCastHost] Capture surface already owned by Vulkan")
+            return
+        }
+        val surface = captureSurface ?: return
+        try {
+            Log.info("[TvMainScreenCastHost] Reattaching capture surface after emulation start")
+            NativeLibrary.secondarySurfaceChanged(surface)
+            NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+        } catch (e: Exception) {
+            Log.error("[TvMainScreenCastHost] Capture surface reattach failed: ${e.message}")
+        }
+    }
+
+    private fun setVideoAspectMode(aspectMode: TvVideoAspectMode) {
+        videoConfig = videoConfig.copy(aspectMode = aspectMode)
+        applyVideoConfig()
+        sendStatus("video_aspect_${aspectMode.protocolValue}")
+    }
+
+    private fun setVideoBitrate(bitrate: TvVideoBitrate) {
+        videoConfig = videoConfig.copy(bitrate = bitrate)
+        updateVideoSenderParameters()
+        sendStatus("video_bitrate_${bitrate.protocolValue}")
+    }
+
+    private fun applyVideoConfig() {
+        try {
+            IntSetting.ASPECT_RATIO.int = videoConfig.aspectMode.aspectRatioSetting
+            settings.saveSetting(IntSetting.ASPECT_RATIO, SettingsFile.FILE_NAME_CONFIG)
+            NativeLibrary.reloadSettings()
+            surfaceTextureHelper?.setTextureSize(videoConfig.width, videoConfig.height)
+            videoSource?.adaptOutputFormat(videoConfig.width, videoConfig.height, CAST_FPS)
+            captureSurface?.let { NativeLibrary.secondarySurfaceChanged(it) }
+            NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+        } catch (e: Exception) {
+            Log.error("[TvMainScreenCastHost] Video config update failed: ${e.message}")
+        }
+        updateVideoSenderParameters()
+    }
+
+    private fun updateVideoSenderParameters() {
+        val sender = synchronized(peerLock) { videoSender } ?: return
+        try {
+            val parameters = sender.parameters ?: return
+            parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            parameters.encodings.forEach { encoding ->
+                encoding.active = true
+                encoding.maxFramerate = CAST_FPS
+                encoding.minBitrateBps = videoConfig.bitrate.minBitrateBps
+                encoding.maxBitrateBps = videoConfig.bitrate.maxBitrateBps
+            }
+            sender.setParameters(parameters)
+            synchronized(peerLock) {
+                peerConnection?.setBitrate(
+                    videoConfig.bitrate.minBitrateBps,
+                    videoConfig.bitrate.startBitrateBps,
+                    videoConfig.bitrate.maxBitrateBps
+                )
+            }
+        } catch (t: Throwable) {
+            Log.warning("[TvMainScreenCastHost] Video sender parameters unavailable: ${t.message}")
+        }
+    }
+
     private fun setAudioMode(mode: AudioMode) {
         audioMode = mode
         updateAudioRouting()
         sendStatus("audio_mode_${mode.protocolValue}")
     }
 
+    private fun setAudioCodec(codec: AudioCodec) {
+        audioCodec = codec
+        clearOpusAudioQueue()
+        updateAudioRouting()
+        sendStatus("audio_codec_${codec.protocolValue}")
+    }
+
     private fun updateAudioRouting() {
-        val shouldSendToTv = audioMode != AudioMode.Host &&
+        val shouldSendPcmToTv = audioMode != AudioMode.Host &&
+            audioCodec == AudioCodec.Pcm &&
             synchronized(peerLock) { audioDataChannel?.state() == DataChannel.State.OPEN }
+        val shouldSendOpusToTv = shouldUseWebRtcOpusAudio() &&
+            synchronized(peerLock) { peerConnection != null && audioSender != null }
+        val shouldSendToTv = shouldSendPcmToTv || shouldSendOpusToTv
         NativeLibrary.setTvAudioTapEnabled(shouldSendToTv)
         NativeLibrary.setTvAudioLocalMute(audioMode == AudioMode.Tv && shouldSendToTv)
+        audioTrack?.setEnabled(shouldSendOpusToTv)
+        if (!shouldSendOpusToTv) {
+            clearOpusAudioQueue()
+        }
     }
+
+    private fun shouldUseWebRtcOpusAudio(): Boolean =
+        audioMode != AudioMode.Host && audioCodec == AudioCodec.Opus
 
     private fun onNativeAudioFrame(
         samples: ShortArray,
@@ -483,7 +855,12 @@ class TvMainScreenCastHost(
         if (sampleRate != NATIVE_SAMPLE_RATE || channels <= 0 || audioMode == AudioMode.Host) {
             return
         }
-        if (synchronized(peerLock) { audioDataChannel?.state() != DataChannel.State.OPEN }) {
+        val targetCodec = audioCodec
+        val sendPcm = targetCodec == AudioCodec.Pcm &&
+            synchronized(peerLock) { audioDataChannel?.state() == DataChannel.State.OPEN }
+        val queueOpus = targetCodec == AudioCodec.Opus &&
+            synchronized(peerLock) { peerConnection != null && audioSender != null }
+        if (!sendPcm && !queueOpus) {
             return
         }
         if (pendingAudioTasks.incrementAndGet() > MAX_PENDING_AUDIO_TASKS) {
@@ -493,9 +870,13 @@ class TvMainScreenCastHost(
         audioExecutor.execute {
             try {
                 audioResampler.push(samples, frames, channels) { pcmChunk ->
-                    val channel = synchronized(peerLock) { audioDataChannel } ?: return@push
-                    if (channel.state() == DataChannel.State.OPEN) {
-                        channel.send(DataChannel.Buffer(ByteBuffer.wrap(pcmChunk), true))
+                    if (targetCodec == AudioCodec.Opus) {
+                        enqueueOpusAudioChunk(pcmChunk)
+                    } else {
+                        val channel = synchronized(peerLock) { audioDataChannel } ?: return@push
+                        if (channel.state() == DataChannel.State.OPEN) {
+                            channel.send(DataChannel.Buffer(ByteBuffer.wrap(pcmChunk), true))
+                        }
                     }
                 }
             } finally {
@@ -504,15 +885,85 @@ class TvMainScreenCastHost(
         }
     }
 
+    private fun enqueueOpusAudioChunk(chunk: ByteArray) {
+        synchronized(opusAudioQueueLock) {
+            while (opusAudioQueue.size >= MAX_OPUS_AUDIO_CHUNKS) {
+                opusAudioQueue.removeFirst()
+            }
+            opusAudioQueue.addLast(chunk)
+        }
+    }
+
+    private fun clearOpusAudioQueue() {
+        synchronized(opusAudioQueueLock) {
+            opusAudioQueue.clear()
+            opusCurrentChunk = null
+            opusCurrentOffset = 0
+        }
+    }
+
+    private fun fillWebRtcOpusAudioBuffer(
+        buffer: ByteBuffer,
+        channelCount: Int,
+        sampleRate: Int,
+        bytesRead: Int,
+    ) {
+        val requestedBytes = minOf(
+            buffer.capacity(),
+            if (bytesRead > 0) bytesRead else AUDIO_CHUNK_FRAMES * 2 * java.lang.Short.BYTES
+        )
+        buffer.clear()
+        if (
+            audioMode == AudioMode.Host ||
+            audioCodec != AudioCodec.Opus ||
+            channelCount != 2 ||
+            sampleRate != WEB_AUDIO_SAMPLE_RATE
+        ) {
+            repeat(requestedBytes) { buffer.put(0) }
+            buffer.rewind()
+            return
+        }
+
+        synchronized(opusAudioQueueLock) {
+            var written = 0
+            while (written < requestedBytes) {
+                val chunk = opusCurrentChunk ?: opusAudioQueue.removeFirstOrNull()?.also {
+                    opusCurrentChunk = it
+                    opusCurrentOffset = 0
+                }
+                if (chunk == null) {
+                    while (written < requestedBytes) {
+                        buffer.put(0)
+                        written++
+                    }
+                    break
+                }
+
+                val copySize = minOf(requestedBytes - written, chunk.size - opusCurrentOffset)
+                buffer.put(chunk, opusCurrentOffset, copySize)
+                opusCurrentOffset += copySize
+                written += copySize
+                if (opusCurrentOffset >= chunk.size) {
+                    opusCurrentChunk = null
+                    opusCurrentOffset = 0
+                }
+            }
+        }
+        buffer.rewind()
+    }
+
     private fun sendStatus(state: String) {
         sendJson(
             JSONObject()
                 .put("type", "status")
                 .put("state", state)
                 .put("pin", pin)
-                .put("videoWidth", TOP_SCREEN_WIDTH)
-                .put("videoHeight", TOP_SCREEN_HEIGHT)
+                .put("videoWidth", videoConfig.width)
+                .put("videoHeight", videoConfig.height)
+                .put("videoAspect", videoConfig.aspectMode.protocolValue)
+                .put("videoBitrate", videoConfig.bitrate.protocolValue)
                 .put("audioMode", audioMode.protocolValue)
+                .put("audioCodec", audioCodec.protocolValue)
                 .put("audioSampleRate", WEB_AUDIO_SAMPLE_RATE)
         )
     }
@@ -523,13 +974,24 @@ class TvMainScreenCastHost(
     }
 
     private fun sendJson(json: JSONObject) {
+        if (!running.get()) {
+            return
+        }
+        val payload = json.toString()
         try {
-            synchronized(peerLock) {
-                webSocket?.sendTextFrame(json.toString())
+            signalingExecutor.execute {
+                try {
+                    val socket = synchronized(peerLock) { webSocket } ?: return@execute
+                    socket.sendTextFrame(payload)
+                } catch (e: Exception) {
+                    if (running.get()) {
+                        Log.error("[TvMainScreenCastHost] Signaling send failed: ${e.message}")
+                    }
+                }
             }
-        } catch (e: Exception) {
+        } catch (_: RejectedExecutionException) {
             if (running.get()) {
-                Log.error("[TvMainScreenCastHost] Signaling send failed: ${e.message}")
+                Log.warning("[TvMainScreenCastHost] Signaling send skipped after shutdown")
             }
         }
     }
@@ -540,20 +1002,61 @@ class TvMainScreenCastHost(
         }
     }
 
-    private fun closePeerConnectionLocked() {
-        audioDataChannel?.unregisterObserver()
-        audioDataChannel?.dispose()
-        audioDataChannel = null
-        peerConnection?.close()
-        peerConnection?.dispose()
-        peerConnection = null
+    private fun dismissPairingDialog() {
+        pairingDialog?.setOnCancelListener(null)
+        pairingDialog?.dismiss()
+        pairingDialog = null
+        statusText = null
+        startGameButton = null
+    }
+
+    private fun handlePairingCancel() {
+        if (protectNativeSurface && NativeLibrary.isRunning()) {
+            dismissPairingDialog()
+            Toast.makeText(
+                activity,
+                R.string.tv_main_screen_cast_vulkan_stop_after_game,
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        requestStop()
+        onCancelBeforeGame?.invoke()
+    }
+
+    private fun closePeerConnection() {
+        val channel: DataChannel?
+        val connection: PeerConnection?
+        synchronized(peerLock) {
+            channel = audioDataChannel
+            connection = peerConnection
+            audioDataChannel = null
+            videoSender = null
+            audioSender = null
+            peerConnection = null
+        }
+        try {
+            channel?.unregisterObserver()
+        } catch (_: Exception) {
+        }
+        try {
+            channel?.dispose()
+        } catch (_: Exception) {
+        }
+        try {
+            connection?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            connection?.dispose()
+        } catch (_: Exception) {
+        }
         updateAudioRouting()
     }
 
     private fun stopWebRtcCapture() {
-        synchronized(peerLock) {
-            closePeerConnectionLocked()
-        }
+        closePeerConnection()
         try {
             videoSource?.capturerObserver?.onCapturerStopped()
         } catch (_: Exception) {
@@ -573,10 +1076,32 @@ class TvMainScreenCastHost(
         videoTrack = null
         videoSource?.dispose()
         videoSource = null
+        audioTrack?.dispose()
+        audioTrack = null
+        audioSource?.dispose()
+        audioSource = null
         peerConnectionFactory?.dispose()
         peerConnectionFactory = null
+        audioDeviceModule?.release()
+        audioDeviceModule = null
         eglBase?.release()
         eglBase = null
+        clearOpusAudioQueue()
+    }
+
+    fun requestStop(): Boolean {
+        if (protectNativeSurface && NativeLibrary.isRunning()) {
+            dismissPairingDialog()
+            Toast.makeText(
+                activity,
+                R.string.tv_main_screen_cast_vulkan_stop_after_game,
+                Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+
+        close()
+        return true
     }
 
     override fun close() {
@@ -590,17 +1115,25 @@ class TvMainScreenCastHost(
         NativeLibrary.setTvAudioFrameCallback(null)
         NativeLibrary.setTvAudioTapEnabled(false)
         NativeLibrary.setTvAudioLocalMute(false)
-        webSocket?.closeQuietly()
+        val socket = synchronized(peerLock) {
+            val currentSocket = webSocket
+            webSocket = null
+            currentSocket
+        }
+        socket?.closeQuietly()
         serverSocket.closeQuietly()
-        stopWebRtcCapture()
-        executor.shutdownNow()
-        audioExecutor.shutdownNow()
+        cleanupExecutor.execute {
+            stopWebRtcCapture()
+            executor.shutdownNow()
+            signalingExecutor.shutdownNow()
+            audioExecutor.shutdownNow()
+            cleanupExecutor.shutdown()
+        }
         mainHandler.post {
-            pairingDialog?.dismiss()
-            pairingDialog = null
-            statusText = null
+            dismissPairingDialog()
             restoreLayout()
             restoreSecondaryDisplay()
+            onStopped()
             Toast.makeText(activity, R.string.tv_main_screen_cast_stopped, Toast.LENGTH_SHORT).show()
         }
     }
@@ -800,17 +1333,30 @@ class TvMainScreenCastHost(
       display: flex;
       gap: 12px;
     }
-    input {
+    .options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    input, select {
       min-width: 0;
-      flex: 1;
       height: 48px;
       border-radius: 6px;
       border: 1px solid rgba(255, 255, 255, 0.22);
       background: rgba(255, 255, 255, 0.08);
       color: #fff;
+    }
+    input {
+      flex: 1;
       font-size: 24px;
       text-align: center;
       letter-spacing: 4px;
+    }
+    select {
+      width: 100%;
+      padding: 0 12px;
+      font-size: 16px;
     }
     button {
       height: 48px;
@@ -835,21 +1381,42 @@ class TvMainScreenCastHost(
 </head>
 <body>
   <video id="video" autoplay playsinline></video>
+  <audio id="opusAudio" autoplay></audio>
   <div id="panel" class="panel">
     <main class="box">
       <h1>Azahar TV Main Screen</h1>
       <label for="pin">PIN shown on the Android host</label>
       <div class="row">
-        <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="6" autofocus>
+        <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="4" autofocus>
         <button id="connect">Connect</button>
+      </div>
+      <div class="options">
+        <div>
+          <label for="audioMode">Audio output</label>
+          <select id="audioMode">
+            <option value="host" selected>Host</option>
+            <option value="tv">TV</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div>
+          <label for="audioCodec">TV audio codec</label>
+          <select id="audioCodec">
+            <option value="pcm" selected>PCM low latency</option>
+            <option value="opus">Opus low bandwidth</option>
+          </select>
+        </div>
       </div>
       <div id="status" class="status">Waiting for PIN</div>
     </main>
   </div>
   <script>
     const video = document.getElementById('video');
+    const opusAudio = document.getElementById('opusAudio');
     const panel = document.getElementById('panel');
     const pinInput = document.getElementById('pin');
+    const audioModeSelect = document.getElementById('audioMode');
+    const audioCodecSelect = document.getElementById('audioCodec');
     const connectButton = document.getElementById('connect');
     const statusText = document.getElementById('status');
 
@@ -871,10 +1438,17 @@ class TvMainScreenCastHost(
       return codecs.filter((codec) => String(codec.mimeType).toLowerCase() === 'video/h264');
     }
 
+    function opusCodecs() {
+      const receiverCaps = window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities
+        ? RTCRtpReceiver.getCapabilities('audio') : null;
+      const codecs = receiverCaps && receiverCaps.codecs ? receiverCaps.codecs : [];
+      return codecs.filter((codec) => String(codec.mimeType).toLowerCase() === 'audio/opus');
+    }
+
     async function connect() {
       const pin = pinInput.value.trim();
-      if (!/^\d{6}$/.test(pin)) {
-        setStatus('Enter the 6 digit PIN', true);
+      if (!/^\d{4}$/.test(pin)) {
+        setStatus('Enter the 4 digit PIN', true);
         return;
       }
       if (!('RTCPeerConnection' in window)) {
@@ -909,13 +1483,20 @@ class TvMainScreenCastHost(
         }
       };
       peer.ontrack = (event) => {
-        video.srcObject = event.streams && event.streams[0]
+        const stream = event.streams && event.streams[0]
           ? event.streams[0]
           : new MediaStream([event.track]);
-        panel.classList.add('hidden');
-        video.play().catch(() => {});
-        if (document.body.requestFullscreen) {
-          document.body.requestFullscreen().catch(() => {});
+        if (event.track.kind === 'video') {
+          video.srcObject = stream;
+          panel.classList.add('hidden');
+          setStatus('Video connected');
+          video.play().catch(() => {});
+          if (document.body.requestFullscreen) {
+            document.body.requestFullscreen().catch(() => {});
+          }
+        } else if (event.track.kind === 'audio') {
+          opusAudio.srcObject = stream;
+          opusAudio.play().catch(() => {});
         }
       };
       peer.onconnectionstatechange = () => {
@@ -929,13 +1510,18 @@ class TvMainScreenCastHost(
       if (transceiver.setCodecPreferences) {
         transceiver.setCodecPreferences(h264);
       }
+      const audioTransceiver = peer.addTransceiver('audio', { direction: 'recvonly' });
+      const opus = opusCodecs();
+      if (audioTransceiver.setCodecPreferences && opus.length) {
+        audioTransceiver.setCodecPreferences(opus);
+      }
 
       const audioChannel = peer.createDataChannel('audio', {
         ordered: false,
         maxRetransmits: 0
       });
       audioChannel.binaryType = 'arraybuffer';
-      audioChannel.onopen = () => setStatus('Connected');
+      audioChannel.onopen = () => setStatus('Control connected, waiting for video...');
       audioChannel.onmessage = (event) => {
         if (audioPlayer) audioPlayer.enqueue(event.data);
       };
@@ -944,7 +1530,11 @@ class TvMainScreenCastHost(
         location.host + '/signal?pin=' + encodeURIComponent(pin);
       socket = new WebSocket(wsUrl);
       socket.onopen = async () => {
-        socket.send(JSON.stringify({ type: 'hello' }));
+        socket.send(JSON.stringify({
+          type: 'hello',
+          audioMode: audioModeSelect.value,
+          audioCodec: audioCodecSelect.value
+        }));
         const offer = await peer.createOffer();
         if (!/H264\/90000/i.test(offer.sdp)) {
           setStatus('The generated offer has no H.264 video.', true);
@@ -967,6 +1557,10 @@ class TvMainScreenCastHost(
         } else if (message.type === 'error') {
           setStatus(message.message || 'Host error', true);
           panel.classList.remove('hidden');
+        } else if (message.type === 'status') {
+          if (message.state === 'video_started') {
+            setStatus('Video started');
+          }
         } else if (message.type === 'stop') {
           setStatus('Cast stopped');
           panel.classList.remove('hidden');
@@ -1153,7 +1747,88 @@ class TvMainScreenCastHost(
     private enum class AudioMode(val protocolValue: String, val labelResId: Int) {
         Host("host", R.string.tv_main_screen_cast_audio_host),
         Tv("tv", R.string.tv_main_screen_cast_audio_tv),
-        Both("both", R.string.tv_main_screen_cast_audio_both),
+        Both("both", R.string.tv_main_screen_cast_audio_both);
+
+        companion object {
+            fun fromProtocolValue(value: String?): AudioMode? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
+    }
+
+    private enum class AudioCodec(val protocolValue: String, val labelResId: Int) {
+        Pcm("pcm", R.string.tv_main_screen_cast_audio_codec_pcm),
+        Opus("opus", R.string.tv_main_screen_cast_audio_codec_opus);
+
+        companion object {
+            fun fromProtocolValue(value: String?): AudioCodec? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
+    }
+
+    private enum class TvVideoAspectMode(
+        val protocolValue: String,
+        val aspectRatioSetting: Int,
+        val labelResId: Int,
+    ) {
+        Native("native", ASPECT_RATIO_DEFAULT, R.string.tv_main_screen_cast_aspect_native),
+        Widescreen("16_9", ASPECT_RATIO_16_9, R.string.tv_main_screen_cast_aspect_16_9),
+        Fill("fill", ASPECT_RATIO_STRETCH, R.string.tv_main_screen_cast_aspect_fill);
+
+        val usesWidescreenSurface: Boolean
+            get() = this != Native
+    }
+
+    private enum class TvVideoResolution(
+        val protocolValue: String,
+        val nativeWidth: Int,
+        val height: Int,
+        val labelResId: Int,
+    ) {
+        OneX("1x", BASE_TOP_SCREEN_WIDTH, BASE_TOP_SCREEN_HEIGHT, R.string.tv_main_screen_cast_resolution_1x),
+        TwoX("2x", BASE_TOP_SCREEN_WIDTH * 2, BASE_TOP_SCREEN_HEIGHT * 2, R.string.tv_main_screen_cast_resolution_2x),
+        ThreeX("3x", BASE_TOP_SCREEN_WIDTH * 3, BASE_TOP_SCREEN_HEIGHT * 3, R.string.tv_main_screen_cast_resolution_3x),
+        FourX("4x", BASE_TOP_SCREEN_WIDTH * 4, BASE_TOP_SCREEN_HEIGHT * 4, R.string.tv_main_screen_cast_resolution_4x),
+        FullHd("1080p", 1800, 1080, R.string.tv_main_screen_cast_resolution_1080p),
+        ;
+
+        fun widthFor(aspectMode: TvVideoAspectMode): Int =
+            if (aspectMode.usesWidescreenSurface) {
+                roundToEven(height * 16f / 9f)
+            } else {
+                nativeWidth
+            }
+    }
+
+    private enum class TvVideoBitrate(
+        val protocolValue: String,
+        val minBitrateBps: Int?,
+        val startBitrateBps: Int?,
+        val maxBitrateBps: Int?,
+        val labelResId: Int,
+    ) {
+        Auto("auto", null, null, null, R.string.tv_main_screen_cast_bitrate_auto),
+        Low("low", 1_500_000, 3_000_000, 4_000_000, R.string.tv_main_screen_cast_bitrate_low),
+        Medium("medium", 3_000_000, 6_000_000, 8_000_000, R.string.tv_main_screen_cast_bitrate_medium),
+        High("high", 5_000_000, 10_000_000, 14_000_000, R.string.tv_main_screen_cast_bitrate_high),
+    }
+
+    private data class TvVideoConfig(
+        val resolution: TvVideoResolution,
+        val aspectMode: TvVideoAspectMode,
+        val bitrate: TvVideoBitrate,
+    ) {
+        val width: Int
+            get() = resolution.widthFor(aspectMode)
+        val height: Int
+            get() = resolution.height
+
+        companion object {
+            fun default(): TvVideoConfig = TvVideoConfig(
+                resolution = TvVideoResolution.TwoX,
+                aspectMode = TvVideoAspectMode.Native,
+                bitrate = TvVideoBitrate.Medium
+            )
+        }
     }
 
     private data class HttpRequest(
@@ -1252,6 +1927,65 @@ class TvMainScreenCastHost(
                     offset += read
                 }
             }
+        }
+    }
+
+    private class H264HardwareCodecPolicy : Predicate<MediaCodecInfo> {
+        val hasAllowedAvcEncoder: Boolean
+
+        private var preferQualcomm: Boolean = false
+
+        init {
+            val hardwareAvcEncoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+                .filter { it.isAllowedHardwareAvcEncoder(ignoreQualcommPreference = true) }
+            preferQualcomm = hardwareAvcEncoders.any { it.isQualcommCodec() }
+            hasAllowedAvcEncoder = hardwareAvcEncoders.any {
+                it.isAllowedHardwareAvcEncoder(ignoreQualcommPreference = false)
+            }
+            val policy = if (preferQualcomm) "Qualcomm H.264" else "hardware H.264"
+            Log.info("[TvMainScreenCastHost] WebRTC encoder policy: $policy only")
+        }
+
+        override fun test(codecInfo: MediaCodecInfo): Boolean {
+            return codecInfo.isAllowedHardwareAvcEncoder(ignoreQualcommPreference = false)
+        }
+
+        private fun MediaCodecInfo.isAllowedHardwareAvcEncoder(
+            ignoreQualcommPreference: Boolean,
+        ): Boolean {
+            return isEncoder &&
+                supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                isHardwareCodec() &&
+                !isSecureOrTunneledCodec() &&
+                (ignoreQualcommPreference || !preferQualcomm || isQualcommCodec())
+        }
+
+        private fun MediaCodecInfo.isHardwareCodec(): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return isHardwareAccelerated && !isSoftwareOnly
+            }
+
+            val lowerName = name.lowercase(Locale.US)
+            val knownSoftwarePrefixes = listOf(
+                "omx.google.",
+                "c2.android.",
+                "c2.google.",
+                "ffmpeg"
+            )
+            return knownSoftwarePrefixes.none { lowerName.startsWith(it) }
+        }
+
+        private fun MediaCodecInfo.isQualcommCodec(): Boolean {
+            val lowerName = name.lowercase(Locale.US)
+            return lowerName.startsWith("c2.qti.") ||
+                lowerName.startsWith("omx.qcom.") ||
+                lowerName.contains("qti") ||
+                lowerName.contains("qcom")
+        }
+
+        private fun MediaCodecInfo.isSecureOrTunneledCodec(): Boolean {
+            val lowerName = name.lowercase(Locale.US)
+            return lowerName.contains(".secure") || lowerName.contains(".tunneled")
         }
     }
 
@@ -1361,19 +2095,40 @@ class TvMainScreenCastHost(
         private val peerConnectionFactoryInitialized = AtomicBoolean(false)
         private val RTPMAP_H264_REGEX = Regex("""a=rtpmap:(\d+)\s+H264/90000""", RegexOption.IGNORE_CASE)
         private const val VIDEO_TRACK_ID = "AZAHAR_TOP_SCREEN"
+        private const val AUDIO_TRACK_ID = "AZAHAR_TV_AUDIO"
         private const val AUDIO_DATA_CHANNEL_LABEL = "audio"
-        private const val TOP_SCREEN_WIDTH = 800
-        private const val TOP_SCREEN_HEIGHT = 480
+        private const val BASE_TOP_SCREEN_WIDTH = 400
+        private const val BASE_TOP_SCREEN_HEIGHT = 240
+        private const val ASPECT_RATIO_DEFAULT = 0
+        private const val ASPECT_RATIO_16_9 = 1
+        private const val ASPECT_RATIO_STRETCH = 5
+        private const val CAST_FPS = 60
         private const val NATIVE_SAMPLE_RATE = 32728
         private const val WEB_AUDIO_SAMPLE_RATE = 48000
         private const val AUDIO_CHUNK_FRAMES = 480
         private const val MAX_PENDING_AUDIO_TASKS = 4
+        private const val MAX_OPUS_AUDIO_CHUNKS = 12
+        private const val RESOLUTION_RADIO_BASE_ID = 30_000
+        private const val ASPECT_RADIO_BASE_ID = 32_500
+        private const val BITRATE_RADIO_BASE_ID = 35_000
         private const val AUDIO_MODE_RADIO_BASE_ID = 40_000
+        private const val AUDIO_CODEC_RADIO_BASE_ID = 45_000
+        private const val TV_CAST_HTTP_PORT = 41315
         private const val HTTP_SOCKET_TIMEOUT_MS = 10_000
         private const val MAX_HTTP_HEADER_BYTES = 16 * 1024
         private const val MAX_WEBSOCKET_PAYLOAD_BYTES = 2 * 1024 * 1024
         private const val HTTP_HEADER_END = "\r\n\r\n"
         private const val WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+        private fun roundToEven(value: Float): Int {
+            val rounded = value.roundToInt()
+            if (rounded % 2 == 0) {
+                return rounded
+            }
+            val lower = rounded - 1
+            val upper = rounded + 1
+            return if (abs(value - lower) <= abs(value - upper)) lower else upper
+        }
 
         private fun ensurePeerConnectionFactoryInitialized(context: android.content.Context) {
             if (peerConnectionFactoryInitialized.compareAndSet(false, true)) {

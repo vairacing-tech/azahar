@@ -26,6 +26,7 @@ import androidx.core.os.BundleCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.navigation.NavController
 import androidx.navigation.fragment.NavHostFragment
 import androidx.preference.PreferenceManager
 import org.citra.citra_emu.CitraApplication
@@ -116,7 +117,6 @@ class EmulationActivity : AppCompatActivity() {
         val navHostFragment =
             supportFragmentManager.findFragmentById(R.id.fragment_container) as NavHostFragment
         val navController = navHostFragment.navController
-        navController.setGraph(R.navigation.emulation_navigation, intent.extras)
 
         isActivityRecreated = savedInstanceState != null
 
@@ -131,22 +131,95 @@ class EmulationActivity : AppCompatActivity() {
 
         EmulationLifecycleUtil.addShutdownHook(onShutdown)
 
-        isEmulationRunning = true
-        instance = this
+        val game = gameFromIntent(intent) ?: return
+        when {
+            intent.getBooleanExtra(EXTRA_DUAL_DEVICE_CAST_ON_START, false) ->
+                prepareDualDeviceCastBeforeGame(game, navController)
+            intent.getBooleanExtra(EXTRA_TV_MAIN_SCREEN_CAST_ON_START, false) ->
+                prepareTvMainScreenCastBeforeGame(game, navController)
+            else -> startEmulationGraph(game, navController)
+        }
+    }
 
-        val game = try {
+    private fun gameFromIntent(intent: Intent): Game? {
+        return try {
             intent.extras?.let { extras ->
                 BundleCompat.getParcelable(extras, "game", Game::class.java)
             } ?: run {
                 Log.error("[EmulationActivity] Missing game data in intent extras")
-                return
+                null
             }
         } catch (e: Exception) {
             Log.error("[EmulationActivity] Failed to retrieve game data: ${e.message}")
+            null
+        }
+    }
+
+    private fun startEmulationGraph(game: Game, navController: NavController) {
+        if (isEmulationRunning) {
             return
         }
 
+        navController.setGraph(R.navigation.emulation_navigation, intent.extras)
+        isEmulationRunning = true
+        instance = this
         NativeLibrary.playTimeManagerStart(game.titleId)
+    }
+
+    private fun prepareDualDeviceCastBeforeGame(
+        game: Game,
+        navController: NavController,
+    ) {
+        try {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            val host = createDualDeviceCastHost(protectNativeSurface = isVulkanRendererSelected())
+            host.start()
+            dualDeviceCastHost = host
+            host.showPairingDialog(
+                onStartGame = {
+                    startEmulationGraph(game, navController)
+                },
+                onCancelBeforeGame = {
+                    finish()
+                }
+            )
+        } catch (e: Exception) {
+            applyOrientationSettings()
+            Toast.makeText(
+                this,
+                getString(R.string.dual_device_cast_error, e.message ?: "unknown"),
+                Toast.LENGTH_LONG
+            ).show()
+            startEmulationGraph(game, navController)
+        }
+    }
+
+    private fun prepareTvMainScreenCastBeforeGame(
+        game: Game,
+        navController: NavController,
+    ) {
+        try {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            val host = createTvMainScreenCastHost(protectNativeSurface = isVulkanRendererSelected())
+            host.start()
+            tvMainScreenCastHost = host
+            host.showPairingDialog(
+                onStartGame = {
+                    startEmulationGraph(game, navController)
+                },
+                onCancelBeforeGame = {
+                    finish()
+                }
+            )
+        } catch (e: Exception) {
+            applyOrientationSettings()
+            Toast.makeText(
+                this,
+                getString(R.string.tv_main_screen_cast_error, e.message ?: "unknown"),
+                Toast.LENGTH_LONG
+            ).show()
+            startEmulationGraph(game, navController)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -281,6 +354,8 @@ class EmulationActivity : AppCompatActivity() {
     fun onEmulationStarted() {
         emulationViewModel.setEmulationStarted(true)
         isEmulationReady = true
+        dualDeviceCastHost?.onEmulationStarted()
+        tvMainScreenCastHost?.onEmulationStarted()
         if (isRotationBlocked) {
             isRotationBlocked = false
             applyOrientationSettings()
@@ -295,24 +370,31 @@ class EmulationActivity : AppCompatActivity() {
     fun toggleDualDeviceCast() {
         val currentHost = dualDeviceCastHost
         if (currentHost?.isRunning == true) {
-            currentHost.close()
-            dualDeviceCastHost = null
+            if (currentHost.requestStop()) {
+                dualDeviceCastHost = null
+            }
             return
         }
         tvMainScreenCastHost?.close()
         tvMainScreenCastHost = null
 
+        if (isVulkanRendererSelected()) {
+            Toast.makeText(
+                this,
+                R.string.dual_device_cast_vulkan_start_before_game,
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
         try {
-            val host = DualDeviceCastHost(
-                activity = this,
-                settings = settingsViewModel.settings,
-                releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
-                restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() }
-            )
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            val host = createDualDeviceCastHost(protectNativeSurface = false)
             host.start()
             dualDeviceCastHost = host
             host.showPairingDialog()
         } catch (e: Exception) {
+            applyOrientationSettings()
             Toast.makeText(
                 this,
                 getString(R.string.dual_device_cast_error, e.message ?: "unknown"),
@@ -326,24 +408,31 @@ class EmulationActivity : AppCompatActivity() {
     fun toggleTvMainScreenCast() {
         val currentHost = tvMainScreenCastHost
         if (currentHost?.isRunning == true) {
-            currentHost.close()
-            tvMainScreenCastHost = null
+            if (currentHost.requestStop()) {
+                tvMainScreenCastHost = null
+            }
             return
         }
         dualDeviceCastHost?.close()
         dualDeviceCastHost = null
 
+        if (isVulkanRendererSelected()) {
+            Toast.makeText(
+                this,
+                R.string.tv_main_screen_cast_vulkan_start_before_game,
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
         try {
-            val host = TvMainScreenCastHost(
-                activity = this,
-                settings = settingsViewModel.settings,
-                releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
-                restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() }
-            )
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            val host = createTvMainScreenCastHost(protectNativeSurface = false)
             host.start()
             tvMainScreenCastHost = host
             host.showPairingDialog()
         } catch (e: Exception) {
+            applyOrientationSettings()
             Toast.makeText(
                 this,
                 getString(R.string.tv_main_screen_cast_error, e.message ?: "unknown"),
@@ -356,6 +445,37 @@ class EmulationActivity : AppCompatActivity() {
 
     private fun isSecondaryCastRunning(): Boolean =
         dualDeviceCastHost?.isRunning == true || tvMainScreenCastHost?.isRunning == true
+
+    private fun createDualDeviceCastHost(protectNativeSurface: Boolean): DualDeviceCastHost =
+        DualDeviceCastHost(
+            activity = this,
+            settings = settingsViewModel.settings,
+            releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
+            restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() },
+            protectNativeSurface = protectNativeSurface,
+            onStopped = {
+                if (!isSecondaryCastRunning()) {
+                    applyOrientationSettings()
+                }
+            }
+        )
+
+    private fun createTvMainScreenCastHost(protectNativeSurface: Boolean): TvMainScreenCastHost =
+        TvMainScreenCastHost(
+            activity = this,
+            settings = settingsViewModel.settings,
+            releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
+            restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() },
+            protectNativeSurface = protectNativeSurface,
+            onStopped = {
+                if (!isSecondaryCastRunning()) {
+                    applyOrientationSettings()
+                }
+            }
+        )
+
+    private fun isVulkanRendererSelected(): Boolean =
+        IntSetting.GRAPHICS_API.int == GRAPHICS_API_VULKAN
 
     private fun enableFullscreenImmersive() {
         val attributes = window.attributes
@@ -379,6 +499,10 @@ class EmulationActivity : AppCompatActivity() {
     }
 
     private fun applyOrientationSettings() {
+        if (isSecondaryCastRunning()) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+            return
+        }
         val orientationOption = IntSetting.ORIENTATION_OPTION.int
         screenAdjustmentUtil.changeActivityOrientation(orientationOption)
     }
@@ -671,6 +795,9 @@ class EmulationActivity : AppCompatActivity() {
         }
 
     companion object {
+        const val EXTRA_DUAL_DEVICE_CAST_ON_START = "dual_device_cast_on_start"
+        const val EXTRA_TV_MAIN_SCREEN_CAST_ON_START = "tv_main_screen_cast_on_start"
+        private const val GRAPHICS_API_VULKAN = 2
         private var instance: EmulationActivity? = null
 
         fun isRunning(): Boolean {

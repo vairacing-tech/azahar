@@ -211,6 +211,41 @@
             app:layout_constraintTop_toBottomOf="@+id/horizontal_layout_2">
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/about_game_play_dual"
+                style="@style/Widget.Material3.Button.TonalButton.Icon"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:contentDescription="@string/dual_device_cast_play_with_second_screen"
+                android:text="@string/dual_device_cast_play_with_second_screen"
+                app:icon="@drawable/ic_splitscreen" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/about_game_play_tv"
+                style="@style/Widget.Material3.Button.TonalButton.Icon"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:contentDescription="@string/tv_main_screen_cast_play_on_tv"
+                android:text="@string/tv_main_screen_cast_play_on_tv"
+                app:icon="@drawable/ic_website" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/horizontal_layout_4"
+            style="@style/ThemeOverlay.Material3.Button.IconButton.Filled.Tonal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="start|center"
+            android:orientation="horizontal"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/horizontal_layout_3">
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/delete_cache"
                 style="@style/Widget.Material3.Button.TonalButton.Icon"
                 android:layout_width="wrap_content"

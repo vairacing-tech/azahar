@@ -50,6 +50,7 @@ import org.citra.citra_emu.CitraApplication
 import org.citra.citra_emu.NativeLibrary
 import org.citra.citra_emu.R
 import org.citra.citra_emu.adapters.GameAdapter.GameViewHolder
+import org.citra.citra_emu.activities.EmulationActivity
 import org.citra.citra_emu.databinding.CardGameBinding
 import org.citra.citra_emu.databinding.DialogShortcutBinding
 import org.citra.citra_emu.features.cheats.ui.CheatsFragmentDirections
@@ -115,18 +116,7 @@ class GameAdapter(
 
         val holder = view.tag as GameViewHolder
         gameExists(holder)
-
-        val preferences =
-            PreferenceManager.getDefaultSharedPreferences(CitraApplication.appContext)
-        preferences.edit()
-            .putLong(
-                holder.game.keyLastPlayedTime,
-                System.currentTimeMillis()
-            )
-            .apply()
-
-        val action = HomeNavigationDirections.actionGlobalEmulationActivity(holder.game)
-        view.findNavController().navigate(action)
+        launchGame(view, holder.game, LaunchCastMode.None)
     }
 
     /**
@@ -394,8 +384,18 @@ class GameAdapter(
         GameIconUtils.loadGameIcon(activity, game, bottomSheetView.findViewById(R.id.game_icon))
 
         bottomSheetView.findViewById<MaterialButton>(R.id.about_game_play).setOnClickListener {
-            val action = HomeNavigationDirections.actionGlobalEmulationActivity(holder.game)
-            view.findNavController().navigate(action)
+            bottomSheetDialog.dismiss()
+            launchGame(view, holder.game, LaunchCastMode.None)
+        }
+
+        bottomSheetView.findViewById<MaterialButton>(R.id.about_game_play_dual).setOnClickListener {
+            bottomSheetDialog.dismiss()
+            launchGame(view, holder.game, LaunchCastMode.DualDevice)
+        }
+
+        bottomSheetView.findViewById<MaterialButton>(R.id.about_game_play_tv).setOnClickListener {
+            bottomSheetDialog.dismiss()
+            launchGame(view, holder.game, LaunchCastMode.TvMainScreen)
         }
 
         bottomSheetView.findViewById<TextView>(R.id.about_game_playtime).text =
@@ -577,6 +577,40 @@ class GameAdapter(
         bottomSheetBehavior.state = BottomSheetBehavior.STATE_EXPANDED
 
         bottomSheetDialog.show()
+    }
+
+    private fun launchGame(view: View, game: Game, castMode: LaunchCastMode) {
+        preferences.edit()
+            .putLong(
+                game.keyLastPlayedTime,
+                System.currentTimeMillis()
+            )
+            .apply()
+
+        if (castMode == LaunchCastMode.None) {
+            val action = HomeNavigationDirections.actionGlobalEmulationActivity(game)
+            view.findNavController().navigate(action)
+            return
+        }
+
+        activity.startActivity(
+            Intent(activity, EmulationActivity::class.java).apply {
+                putExtra("game", game)
+                when (castMode) {
+                    LaunchCastMode.DualDevice ->
+                        putExtra(EmulationActivity.EXTRA_DUAL_DEVICE_CAST_ON_START, true)
+                    LaunchCastMode.TvMainScreen ->
+                        putExtra(EmulationActivity.EXTRA_TV_MAIN_SCREEN_CAST_ON_START, true)
+                    LaunchCastMode.None -> Unit
+                }
+            }
+        )
+    }
+
+    private enum class LaunchCastMode {
+        None,
+        DualDevice,
+        TvMainScreen,
     }
 
     private fun refreshShortcutDialogIcon() {
