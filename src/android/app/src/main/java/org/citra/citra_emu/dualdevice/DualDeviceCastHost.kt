@@ -287,7 +287,12 @@ class DualDeviceCastHost(
 
     fun onEmulationStarted() {
         if (protectNativeSurface) {
-            Log.info("[DualDeviceCastHost] Encoder surface already owned by Vulkan")
+            Log.info("[DualDeviceCastHost] Encoder surface owned by Vulkan; refreshing framebuffer")
+            try {
+                NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+            } catch (e: Exception) {
+                Log.error("[DualDeviceCastHost] Vulkan framebuffer refresh failed: ${e.message}")
+            }
             return
         }
         val surface = encoderSurface ?: return
@@ -374,13 +379,19 @@ class DualDeviceCastHost(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, CAST_FPS)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, CAST_GOP_SECONDS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setInteger(MediaFormat.KEY_LATENCY, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, CAST_MAX_B_FRAMES)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setInteger(MediaFormat.KEY_VIDEO_QP_P_MAX, CAST_QP_P_MAX)
             }
             if (tuned) {
                 applyEncoderTuning(encoderInfo)
@@ -737,6 +748,9 @@ class DualDeviceCastHost(
         private const val MIN_MULTIPLIER = 1
         private const val MAX_MULTIPLIER = 4
         private const val CAST_FPS = 60
+        private const val CAST_GOP_SECONDS = 1
+        private const val CAST_MAX_B_FRAMES = 0
+        private const val CAST_QP_P_MAX = 34
         private const val BASE_BITRATE = 4_000_000
         private const val MIN_BITRATE = 1_500_000
         private const val MAX_BITRATE = 12_000_000

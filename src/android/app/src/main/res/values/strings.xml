@@ -1004,7 +1004,6 @@
     <string name="tv_main_screen_cast_stop">Stop TV Main Screen Cast</string>
     <string name="tv_main_screen_cast_pairing_title">TV main screen</string>
     <string name="tv_main_screen_cast_pairing_message">Open this URL on the TV browser:</string>
-    <string name="tv_main_screen_cast_pin">PIN: %1$s</string>
     <string name="tv_main_screen_cast_waiting">Waiting for TV...</string>
     <string name="tv_main_screen_cast_connected">TV connected</string>
     <string name="tv_main_screen_cast_ready_to_start">TV connected. Start the game when ready.</string>
@@ -1030,6 +1029,11 @@
     <string name="tv_main_screen_cast_bitrate_low">Low 4 Mbps</string>
     <string name="tv_main_screen_cast_bitrate_medium">Medium 8 Mbps</string>
     <string name="tv_main_screen_cast_bitrate_high">High 14 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_very_high">Very high 24 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_ultra">Ultra 35 Mbps</string>
+    <string name="tv_main_screen_cast_video_priority">Video priority</string>
+    <string name="tv_main_screen_cast_video_priority_low_latency">Low latency</string>
+    <string name="tv_main_screen_cast_video_priority_quality">Quality</string>
     <string name="tv_main_screen_cast_audio_mode">Audio output</string>
     <string name="tv_main_screen_cast_audio_host">Host</string>
     <string name="tv_main_screen_cast_audio_tv">TV</string>

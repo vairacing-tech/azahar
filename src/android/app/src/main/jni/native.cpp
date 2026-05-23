@@ -422,16 +422,6 @@ void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceChanged(JNIEnv* env
 
 void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceDestroyed(
     JNIEnv* env, [[maybe_unused]] jobject obj) {
-    auto& system = Core::System::GetInstance();
-
-    bool notify = false;
-    if (secondary_window) {
-        notify = secondary_window->OnSurfaceChanged(nullptr);
-    }
-
-    if (notify && system.IsPoweredOn()) {
-        system.GPU().Renderer().NotifySurfaceChanged(true);
-    }
     RetireSecondarySurface();
 
     LOG_INFO(Frontend, "Secondary Surface Destroyed");

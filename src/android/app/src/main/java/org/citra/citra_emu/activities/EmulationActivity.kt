@@ -450,8 +450,8 @@ class EmulationActivity : AppCompatActivity() {
         DualDeviceCastHost(
             activity = this,
             settings = settingsViewModel.settings,
-            releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
-            restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() },
+            releaseSecondaryDisplay = { secondaryDisplay.suspendPresentation() },
+            restoreSecondaryDisplay = { secondaryDisplay.resumePresentation() },
             protectNativeSurface = protectNativeSurface,
             onStopped = {
                 if (!isSecondaryCastRunning()) {
@@ -464,8 +464,8 @@ class EmulationActivity : AppCompatActivity() {
         TvMainScreenCastHost(
             activity = this,
             settings = settingsViewModel.settings,
-            releaseSecondaryDisplay = { secondaryDisplay.releasePresentation() },
-            restoreSecondaryDisplay = { secondaryDisplay.updateDisplay() },
+            releaseSecondaryDisplay = { secondaryDisplay.suspendPresentation() },
+            restoreSecondaryDisplay = { secondaryDisplay.resumePresentation() },
             protectNativeSurface = protectNativeSurface,
             onStopped = {
                 if (!isSecondaryCastRunning()) {

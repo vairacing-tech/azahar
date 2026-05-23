@@ -35,7 +35,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -58,10 +57,10 @@ import org.citra.citra_emu.utils.Log
 import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.AzaharHardwareVideoEncoderFactory
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.EglBase
-import org.webrtc.HardwareVideoEncoderFactory
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStreamTrack
@@ -77,6 +76,7 @@ import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCodecInfo
 import org.webrtc.VideoEncoder
 import org.webrtc.VideoEncoderFactory
+import org.webrtc.VideoFrame
 import org.webrtc.VideoSink
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
@@ -97,13 +97,16 @@ class TvMainScreenCastHost(
     private val audioExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val cleanupExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val running = AtomicBoolean(false)
-    private val pin = "%04d".format(SecureRandom().nextInt(10_000))
     private val peerLock = Any()
     private val pendingAudioTasks = AtomicInteger(0)
     private val capturedVideoFrames = AtomicInteger(0)
     private val audioResampler = Pcm16Resampler(NATIVE_SAMPLE_RATE, WEB_AUDIO_SAMPLE_RATE)
     private val opusAudioQueueLock = Object()
     private val opusAudioQueue = ArrayDeque<ByteArray>()
+    private val preferences = activity.getSharedPreferences(
+        TV_CAST_PREFS_NAME,
+        android.content.Context.MODE_PRIVATE
+    )
 
     private var serverSocket: ServerSocket? = null
     private var webSocket: WebSocketConnection? = null
@@ -113,9 +116,9 @@ class TvMainScreenCastHost(
     private var onStartGame: (() -> Unit)? = null
     private var onCancelBeforeGame: (() -> Unit)? = null
     private val gameStartRequested = AtomicBoolean(false)
-    private var audioMode = AudioMode.Host
-    private var audioCodec = AudioCodec.Pcm
-    private var videoConfig = TvVideoConfig.default()
+    private var audioMode = loadAudioMode()
+    private var audioCodec = loadAudioCodec()
+    private var videoConfig = loadVideoConfig()
 
     private var eglBase: EglBase? = null
     private var peerConnectionFactory: PeerConnectionFactory? = null
@@ -188,16 +191,10 @@ class TvMainScreenCastHost(
             setTextIsSelectable(true)
         })
         content.addView(TextView(activity).apply {
-            text = activity.getString(R.string.tv_main_screen_cast_pin, pin)
-            textSize = 28f
-            textAlignment = TextView.TEXT_ALIGNMENT_CENTER
-            setPadding(0, (16 * density).toInt(), 0, (12 * density).toInt())
-        })
-        content.addView(TextView(activity).apply {
             setText(R.string.tv_main_screen_cast_resolution)
         })
         content.addView(RadioGroup(activity).apply {
-            orientation = RadioGroup.HORIZONTAL
+            orientation = RadioGroup.VERTICAL
             TvVideoResolution.entries.forEachIndexed { index, resolution ->
                 addView(RadioButton(activity).apply {
                     id = RESOLUTION_RADIO_BASE_ID + index
@@ -216,7 +213,7 @@ class TvMainScreenCastHost(
             setText(R.string.tv_main_screen_cast_aspect)
         })
         content.addView(RadioGroup(activity).apply {
-            orientation = RadioGroup.HORIZONTAL
+            orientation = RadioGroup.VERTICAL
             TvVideoAspectMode.entries.forEachIndexed { index, aspectMode ->
                 addView(RadioButton(activity).apply {
                     id = ASPECT_RADIO_BASE_ID + index
@@ -235,7 +232,7 @@ class TvMainScreenCastHost(
             setText(R.string.tv_main_screen_cast_bitrate)
         })
         content.addView(RadioGroup(activity).apply {
-            orientation = RadioGroup.HORIZONTAL
+            orientation = RadioGroup.VERTICAL
             TvVideoBitrate.entries.forEachIndexed { index, bitrate ->
                 addView(RadioButton(activity).apply {
                     id = BITRATE_RADIO_BASE_ID + index
@@ -251,10 +248,29 @@ class TvMainScreenCastHost(
             }
         })
         content.addView(TextView(activity).apply {
+            setText(R.string.tv_main_screen_cast_video_priority)
+        })
+        content.addView(RadioGroup(activity).apply {
+            orientation = RadioGroup.VERTICAL
+            TvVideoPriority.entries.forEachIndexed { index, priority ->
+                addView(RadioButton(activity).apply {
+                    id = VIDEO_PRIORITY_RADIO_BASE_ID + index
+                    text = activity.getString(priority.labelResId)
+                    isChecked = priority == videoConfig.priority
+                })
+            }
+            setOnCheckedChangeListener { _, checkedId ->
+                val index = checkedId - VIDEO_PRIORITY_RADIO_BASE_ID
+                if (index in TvVideoPriority.entries.indices) {
+                    setVideoPriority(TvVideoPriority.entries[index])
+                }
+            }
+        })
+        content.addView(TextView(activity).apply {
             setText(R.string.tv_main_screen_cast_audio_mode)
         })
         content.addView(RadioGroup(activity).apply {
-            orientation = RadioGroup.HORIZONTAL
+            orientation = RadioGroup.VERTICAL
             AudioMode.entries.forEachIndexed { index, mode ->
                 addView(RadioButton(activity).apply {
                     id = AUDIO_MODE_RADIO_BASE_ID + index
@@ -273,7 +289,7 @@ class TvMainScreenCastHost(
             setText(R.string.tv_main_screen_cast_audio_codec)
         })
         content.addView(RadioGroup(activity).apply {
-            orientation = RadioGroup.HORIZONTAL
+            orientation = RadioGroup.VERTICAL
             AudioCodec.entries.forEachIndexed { index, codec ->
                 addView(RadioButton(activity).apply {
                     id = AUDIO_CODEC_RADIO_BASE_ID + index
@@ -326,6 +342,38 @@ class TvMainScreenCastHost(
 
     private fun pairingUrl(): String = "http://${findLocalIpv4Address()}:${serverSocket?.localPort ?: 0}/tv"
 
+    private fun loadVideoConfig(): TvVideoConfig = TvVideoConfig(
+        resolution = TvVideoResolution.fromProtocolValue(
+            preferences.getString(PREF_VIDEO_RESOLUTION, null)
+        ) ?: TvVideoResolution.TwoX,
+        aspectMode = TvVideoAspectMode.fromProtocolValue(
+            preferences.getString(PREF_VIDEO_ASPECT, null)
+        ) ?: TvVideoAspectMode.Native,
+        bitrate = TvVideoBitrate.fromProtocolValue(
+            preferences.getString(PREF_VIDEO_BITRATE, null)
+        ) ?: TvVideoBitrate.Medium,
+        priority = TvVideoPriority.fromProtocolValue(
+            preferences.getString(PREF_VIDEO_PRIORITY, null)
+        ) ?: TvVideoPriority.LowLatency
+    )
+
+    private fun loadAudioMode(): AudioMode =
+        AudioMode.fromProtocolValue(preferences.getString(PREF_AUDIO_MODE, null)) ?: AudioMode.Host
+
+    private fun loadAudioCodec(): AudioCodec =
+        AudioCodec.fromProtocolValue(preferences.getString(PREF_AUDIO_CODEC, null)) ?: AudioCodec.Pcm
+
+    private fun saveTvCastPreferences() {
+        preferences.edit()
+            .putString(PREF_VIDEO_RESOLUTION, videoConfig.resolution.protocolValue)
+            .putString(PREF_VIDEO_ASPECT, videoConfig.aspectMode.protocolValue)
+            .putString(PREF_VIDEO_BITRATE, videoConfig.bitrate.protocolValue)
+            .putString(PREF_VIDEO_PRIORITY, videoConfig.priority.protocolValue)
+            .putString(PREF_AUDIO_MODE, audioMode.protocolValue)
+            .putString(PREF_AUDIO_CODEC, audioCodec.protocolValue)
+            .apply()
+    }
+
     private fun applyCastLayout() {
         IntSetting.SCREEN_LAYOUT.int = ScreenLayout.SINGLE_SCREEN.int
         BooleanSetting.SWAP_SCREEN.boolean = true
@@ -363,7 +411,14 @@ class TvMainScreenCastHost(
         eglBase = egl
         val codecPolicy = H264HardwareCodecPolicy()
         val encoderFactory = H264OnlyVideoEncoderFactory(
-            HardwareVideoEncoderFactory(egl.eglBaseContext, true, false, codecPolicy)
+            AzaharHardwareVideoEncoderFactory(
+                egl.eglBaseContext,
+                false,
+                codecPolicy,
+                TV_CAST_GOP_SECONDS,
+                TV_CAST_MAX_B_FRAMES,
+                TV_CAST_QP_P_MAX
+            )
         )
         if (!codecPolicy.hasAllowedAvcEncoder) {
             throw IllegalStateException("No hardware H.264 encoder available for TV cast")
@@ -376,7 +431,7 @@ class TvMainScreenCastHost(
             .setOutputSampleRate(WEB_AUDIO_SAMPLE_RATE)
             .setAudioBufferCallback { buffer, _, channelCount, sampleRate, bytesRead, captureTimeNs ->
                 fillWebRtcOpusAudioBuffer(buffer, channelCount, sampleRate, bytesRead)
-                captureTimeNs
+                if (captureTimeNs != 0L) captureTimeNs else System.nanoTime()
             }
             .createAudioDeviceModule()
         audioModule.setAudioRecordEnabled(false)
@@ -407,11 +462,7 @@ class TvMainScreenCastHost(
         surfaceTextureHelper = textureHelper
         source.capturerObserver.onCapturerStarted(true)
         textureHelper.startListening(VideoSink { frame ->
-            if (capturedVideoFrames.incrementAndGet() == 1) {
-                Log.info("[TvMainScreenCastHost] First video frame captured")
-                sendStatus("video_started")
-            }
-            source.capturerObserver.onFrameCaptured(frame)
+            forwardVideoFrame(source, frame)
         })
         captureSurface = Surface(textureHelper.surfaceTexture)
         NativeLibrary.secondarySurfaceChanged(captureSurface!!)
@@ -456,10 +507,6 @@ class TvMainScreenCastHost(
         input: BufferedInputStream,
         output: BufferedOutputStream,
     ) {
-        if (request.query["pin"] != pin) {
-            serveForbidden(output)
-            return
-        }
         val key = request.headers["sec-websocket-key"]
         if (key.isNullOrBlank()) {
             serveBadRequest(output)
@@ -599,11 +646,21 @@ class TvMainScreenCastHost(
     }
 
     private fun applyClientConfig(json: JSONObject) {
+        var changed = false
         AudioMode.fromProtocolValue(json.optString("audioMode").takeIf { json.has("audioMode") })?.let {
-            audioMode = it
+            if (audioMode != it) {
+                audioMode = it
+                changed = true
+            }
         }
         AudioCodec.fromProtocolValue(json.optString("audioCodec").takeIf { json.has("audioCodec") })?.let {
-            audioCodec = it
+            if (audioCodec != it) {
+                audioCodec = it
+                changed = true
+            }
+        }
+        if (changed) {
+            saveTvCastPreferences()
         }
         updateAudioRouting()
     }
@@ -745,13 +802,20 @@ class TvMainScreenCastHost(
 
     private fun setVideoResolution(resolution: TvVideoResolution) {
         videoConfig = videoConfig.copy(resolution = resolution)
+        saveTvCastPreferences()
         applyVideoConfig()
         sendStatus("video_resolution_${resolution.protocolValue}")
     }
 
     fun onEmulationStarted() {
         if (protectNativeSurface) {
-            Log.info("[TvMainScreenCastHost] Capture surface already owned by Vulkan")
+            Log.info("[TvMainScreenCastHost] Capture surface owned by Vulkan; refreshing framebuffer")
+            try {
+                NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+            } catch (e: Exception) {
+                Log.error("[TvMainScreenCastHost] Vulkan framebuffer refresh failed: ${e.message}")
+            }
+            scheduleNoVideoFrameWarning()
             return
         }
         val surface = captureSurface ?: return
@@ -759,6 +823,7 @@ class TvMainScreenCastHost(
             Log.info("[TvMainScreenCastHost] Reattaching capture surface after emulation start")
             NativeLibrary.secondarySurfaceChanged(surface)
             NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+            scheduleNoVideoFrameWarning()
         } catch (e: Exception) {
             Log.error("[TvMainScreenCastHost] Capture surface reattach failed: ${e.message}")
         }
@@ -766,14 +831,23 @@ class TvMainScreenCastHost(
 
     private fun setVideoAspectMode(aspectMode: TvVideoAspectMode) {
         videoConfig = videoConfig.copy(aspectMode = aspectMode)
+        saveTvCastPreferences()
         applyVideoConfig()
         sendStatus("video_aspect_${aspectMode.protocolValue}")
     }
 
     private fun setVideoBitrate(bitrate: TvVideoBitrate) {
         videoConfig = videoConfig.copy(bitrate = bitrate)
+        saveTvCastPreferences()
         updateVideoSenderParameters()
         sendStatus("video_bitrate_${bitrate.protocolValue}")
+    }
+
+    private fun setVideoPriority(priority: TvVideoPriority) {
+        videoConfig = videoConfig.copy(priority = priority)
+        saveTvCastPreferences()
+        updateVideoSenderParameters()
+        sendStatus("video_priority_${priority.protocolValue}")
     }
 
     private fun applyVideoConfig() {
@@ -783,7 +857,11 @@ class TvMainScreenCastHost(
             NativeLibrary.reloadSettings()
             surfaceTextureHelper?.setTextureSize(videoConfig.width, videoConfig.height)
             videoSource?.adaptOutputFormat(videoConfig.width, videoConfig.height, CAST_FPS)
-            captureSurface?.let { NativeLibrary.secondarySurfaceChanged(it) }
+            if (protectNativeSurface) {
+                Log.info("[TvMainScreenCastHost] Vulkan capture config changed; keeping existing surface")
+            } else {
+                captureSurface?.let { NativeLibrary.secondarySurfaceChanged(it) }
+            }
             NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
         } catch (e: Exception) {
             Log.error("[TvMainScreenCastHost] Video config update failed: ${e.message}")
@@ -791,11 +869,41 @@ class TvMainScreenCastHost(
         updateVideoSenderParameters()
     }
 
+    private fun forwardVideoFrame(source: VideoSource, frame: VideoFrame) {
+        noteVideoFrameCaptured()
+        frame.buffer.retain()
+        val forwardedFrame = VideoFrame(frame.buffer, frame.rotation, System.nanoTime())
+        try {
+            source.capturerObserver.onFrameCaptured(forwardedFrame)
+        } finally {
+            forwardedFrame.release()
+        }
+    }
+
+    private fun noteVideoFrameCaptured() {
+        val count = capturedVideoFrames.incrementAndGet()
+        if (count == 1) {
+            Log.info("[TvMainScreenCastHost] First video frame captured")
+            sendStatus("video_started")
+        } else if (count % 120 == 0) {
+            Log.info("[TvMainScreenCastHost] WebRTC video frames captured: $count")
+        }
+    }
+
+    private fun scheduleNoVideoFrameWarning() {
+        mainHandler.postDelayed({
+            if (running.get() && capturedVideoFrames.get() == 0) {
+                Log.warning("[TvMainScreenCastHost] No WebRTC video frames captured after emulation start")
+                sendStatus("video_waiting_no_frames")
+            }
+        }, VIDEO_FRAME_WARNING_DELAY_MS)
+    }
+
     private fun updateVideoSenderParameters() {
         val sender = synchronized(peerLock) { videoSender } ?: return
         try {
             val parameters = sender.parameters ?: return
-            parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+            parameters.degradationPreference = videoConfig.priority.degradationPreference
             parameters.encodings.forEach { encoding ->
                 encoding.active = true
                 encoding.maxFramerate = CAST_FPS
@@ -817,12 +925,14 @@ class TvMainScreenCastHost(
 
     private fun setAudioMode(mode: AudioMode) {
         audioMode = mode
+        saveTvCastPreferences()
         updateAudioRouting()
         sendStatus("audio_mode_${mode.protocolValue}")
     }
 
     private fun setAudioCodec(codec: AudioCodec) {
         audioCodec = codec
+        saveTvCastPreferences()
         clearOpusAudioQueue()
         updateAudioRouting()
         sendStatus("audio_codec_${codec.protocolValue}")
@@ -838,6 +948,13 @@ class TvMainScreenCastHost(
         NativeLibrary.setTvAudioTapEnabled(shouldSendToTv)
         NativeLibrary.setTvAudioLocalMute(audioMode == AudioMode.Tv && shouldSendToTv)
         audioTrack?.setEnabled(shouldSendOpusToTv)
+        (audioDeviceModule as? JavaAudioDeviceModule)?.let { module ->
+            if (shouldSendOpusToTv) {
+                module.requestStartRecording()
+            } else {
+                module.requestStopRecording()
+            }
+        }
         if (!shouldSendOpusToTv) {
             clearOpusAudioQueue()
         }
@@ -957,11 +1074,11 @@ class TvMainScreenCastHost(
             JSONObject()
                 .put("type", "status")
                 .put("state", state)
-                .put("pin", pin)
                 .put("videoWidth", videoConfig.width)
                 .put("videoHeight", videoConfig.height)
                 .put("videoAspect", videoConfig.aspectMode.protocolValue)
                 .put("videoBitrate", videoConfig.bitrate.protocolValue)
+                .put("videoPriority", videoConfig.priority.protocolValue)
                 .put("audioMode", audioMode.protocolValue)
                 .put("audioCodec", audioCodec.protocolValue)
                 .put("audioSampleRate", WEB_AUDIO_SAMPLE_RATE)
@@ -1197,10 +1314,6 @@ class TvMainScreenCastHost(
         writeHttpResponse(output, "404 Not Found", "text/plain; charset=utf-8", "Not found".toByteArray())
     }
 
-    private fun serveForbidden(output: BufferedOutputStream) {
-        writeHttpResponse(output, "403 Forbidden", "text/plain; charset=utf-8", "Invalid PIN".toByteArray())
-    }
-
     private fun serveBadRequest(output: BufferedOutputStream) {
         writeHttpResponse(output, "400 Bad Request", "text/plain; charset=utf-8", "Bad request".toByteArray())
     }
@@ -1251,7 +1364,7 @@ class TvMainScreenCastHost(
             match?.groupValues?.getOrNull(1)
         }.toSet()
         if (h264Payloads.isEmpty()) return sdp
-        return lines.joinToString("\r\n") { line ->
+        val h264OnlyLines = lines.map { line ->
             if (line.startsWith("m=video ")) {
                 val parts = line.split(" ")
                 if (parts.size > 3) {
@@ -1263,6 +1376,79 @@ class TvMainScreenCastHost(
                 line
             }
         }
+        return applyVideoBandwidthLines(
+            applyH264BitrateFmtp(h264OnlyLines, h264Payloads)
+        ).joinToString("\r\n")
+    }
+
+    private fun applyH264BitrateFmtp(lines: List<String>, h264Payloads: Set<String>): List<String> {
+        val bitrateParameters = videoConfig.bitrate.fmtpParameters() ?: return lines
+        val fmtpPayloads = lines.mapNotNull { line ->
+            FMTP_REGEX.matchEntire(line)?.groupValues?.getOrNull(1)
+        }.toSet()
+        return buildList {
+            lines.forEach { line ->
+                val fmtpMatch = FMTP_REGEX.matchEntire(line)
+                if (fmtpMatch != null && fmtpMatch.groupValues[1] in h264Payloads) {
+                    add("a=fmtp:${fmtpMatch.groupValues[1]} ${mergeFmtpParameters(fmtpMatch.groupValues[2], bitrateParameters)}")
+                } else {
+                    add(line)
+                    val rtpMapMatch = RTPMAP_H264_REGEX.matchEntire(line)
+                    val payload = rtpMapMatch?.groupValues?.getOrNull(1)
+                    if (payload != null && payload !in fmtpPayloads) {
+                        add("a=fmtp:$payload ${bitrateParameters.joinToString(";")}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun applyVideoBandwidthLines(lines: List<String>): List<String> {
+        val maxBitrate = videoConfig.bitrate.maxBitrateBps ?: return lines
+        val asKbps = maxBitrate / 1000
+        val output = mutableListOf<String>()
+        var inVideo = false
+        var bandwidthInserted = false
+
+        fun insertBandwidth() {
+            if (!bandwidthInserted) {
+                output.add("b=AS:$asKbps")
+                output.add("b=TIAS:$maxBitrate")
+                bandwidthInserted = true
+            }
+        }
+
+        lines.forEach { line ->
+            if (line.startsWith("m=")) {
+                if (inVideo) {
+                    insertBandwidth()
+                }
+                inVideo = line.startsWith("m=video ")
+                bandwidthInserted = false
+            }
+            if (inVideo && (line.startsWith("b=AS:") || line.startsWith("b=TIAS:"))) {
+                return@forEach
+            }
+            if (inVideo && !bandwidthInserted && line.startsWith("a=")) {
+                insertBandwidth()
+            }
+            output.add(line)
+            if (inVideo && !bandwidthInserted && line.startsWith("c=")) {
+                insertBandwidth()
+            }
+        }
+        if (inVideo) {
+            insertBandwidth()
+        }
+        return output
+    }
+
+    private fun mergeFmtpParameters(existingParameters: String, bitrateParameters: List<String>): String {
+        val existing = existingParameters.split(";")
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .filterNot { it.startsWith("x-google-", ignoreCase = true) }
+        return (existing + bitrateParameters).joinToString(";")
     }
 
     private fun tvReceiverHtml(): String = """
@@ -1358,6 +1544,10 @@ class TvMainScreenCastHost(
       padding: 0 12px;
       font-size: 16px;
     }
+    select option {
+      background: #ffffff;
+      color: #111827;
+    }
     button {
       height: 48px;
       padding: 0 20px;
@@ -1385,44 +1575,24 @@ class TvMainScreenCastHost(
   <div id="panel" class="panel">
     <main class="box">
       <h1>Azahar TV Main Screen</h1>
-      <label for="pin">PIN shown on the Android host</label>
       <div class="row">
-        <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="4" autofocus>
-        <button id="connect">Connect</button>
+        <button id="connect" autofocus>Connect</button>
       </div>
-      <div class="options">
-        <div>
-          <label for="audioMode">Audio output</label>
-          <select id="audioMode">
-            <option value="host" selected>Host</option>
-            <option value="tv">TV</option>
-            <option value="both">Both</option>
-          </select>
-        </div>
-        <div>
-          <label for="audioCodec">TV audio codec</label>
-          <select id="audioCodec">
-            <option value="pcm" selected>PCM low latency</option>
-            <option value="opus">Opus low bandwidth</option>
-          </select>
-        </div>
-      </div>
-      <div id="status" class="status">Waiting for PIN</div>
+      <div id="status" class="status">Ready to connect</div>
     </main>
   </div>
   <script>
     const video = document.getElementById('video');
     const opusAudio = document.getElementById('opusAudio');
     const panel = document.getElementById('panel');
-    const pinInput = document.getElementById('pin');
-    const audioModeSelect = document.getElementById('audioMode');
-    const audioCodecSelect = document.getElementById('audioCodec');
     const connectButton = document.getElementById('connect');
     const statusText = document.getElementById('status');
 
     let socket = null;
     let peer = null;
     let audioPlayer = null;
+
+    video.onplaying = () => panel.classList.add('hidden');
 
     function setStatus(message, isError) {
       statusText.textContent = message;
@@ -1446,11 +1616,6 @@ class TvMainScreenCastHost(
     }
 
     async function connect() {
-      const pin = pinInput.value.trim();
-      if (!/^\d{4}$/.test(pin)) {
-        setStatus('Enter the 4 digit PIN', true);
-        return;
-      }
       if (!('RTCPeerConnection' in window)) {
         setStatus('This TV browser does not support WebRTC.', true);
         return;
@@ -1488,8 +1653,7 @@ class TvMainScreenCastHost(
           : new MediaStream([event.track]);
         if (event.track.kind === 'video') {
           video.srcObject = stream;
-          panel.classList.add('hidden');
-          setStatus('Video connected');
+          setStatus('Connected, waiting for video...');
           video.play().catch(() => {});
           if (document.body.requestFullscreen) {
             document.body.requestFullscreen().catch(() => {});
@@ -1527,13 +1691,11 @@ class TvMainScreenCastHost(
       };
 
       const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
-        location.host + '/signal?pin=' + encodeURIComponent(pin);
+        location.host + '/signal';
       socket = new WebSocket(wsUrl);
       socket.onopen = async () => {
         socket.send(JSON.stringify({
-          type: 'hello',
-          audioMode: audioModeSelect.value,
-          audioCodec: audioCodecSelect.value
+          type: 'hello'
         }));
         const offer = await peer.createOffer();
         if (!/H264\/90000/i.test(offer.sdp)) {
@@ -1560,6 +1722,10 @@ class TvMainScreenCastHost(
         } else if (message.type === 'status') {
           if (message.state === 'video_started') {
             setStatus('Video started');
+            panel.classList.add('hidden');
+          } else if (message.state === 'video_waiting_no_frames') {
+            setStatus('Connected, but no video frames are arriving from Android yet.', true);
+            panel.classList.remove('hidden');
           }
         } else if (message.type === 'stop') {
           setStatus('Cast stopped');
@@ -1722,9 +1888,6 @@ class TvMainScreenCastHost(
     }
 
     connectButton.addEventListener('click', connect);
-    pinInput.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') connect();
-    });
   </script>
 </body>
 </html>
@@ -1776,6 +1939,11 @@ class TvMainScreenCastHost(
 
         val usesWidescreenSurface: Boolean
             get() = this != Native
+
+        companion object {
+            fun fromProtocolValue(value: String?): TvVideoAspectMode? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
     }
 
     private enum class TvVideoResolution(
@@ -1797,6 +1965,11 @@ class TvMainScreenCastHost(
             } else {
                 nativeWidth
             }
+
+        companion object {
+            fun fromProtocolValue(value: String?): TvVideoResolution? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
     }
 
     private enum class TvVideoBitrate(
@@ -1808,14 +1981,56 @@ class TvMainScreenCastHost(
     ) {
         Auto("auto", null, null, null, R.string.tv_main_screen_cast_bitrate_auto),
         Low("low", 1_500_000, 3_000_000, 4_000_000, R.string.tv_main_screen_cast_bitrate_low),
-        Medium("medium", 3_000_000, 6_000_000, 8_000_000, R.string.tv_main_screen_cast_bitrate_medium),
-        High("high", 5_000_000, 10_000_000, 14_000_000, R.string.tv_main_screen_cast_bitrate_high),
+        Medium("medium", 2_000_000, 6_000_000, 8_000_000, R.string.tv_main_screen_cast_bitrate_medium),
+        High("high", 3_000_000, 10_000_000, 14_000_000, R.string.tv_main_screen_cast_bitrate_high),
+        VeryHigh("very_high", 4_000_000, 16_000_000, 24_000_000, R.string.tv_main_screen_cast_bitrate_very_high),
+        Ultra("ultra", 5_000_000, 22_000_000, 35_000_000, R.string.tv_main_screen_cast_bitrate_ultra),
+        ;
+
+        fun fmtpParameters(): List<String>? {
+            val minKbps = minBitrateBps?.div(1000) ?: return null
+            val startKbps = startBitrateBps?.div(1000) ?: return null
+            val maxKbps = maxBitrateBps?.div(1000) ?: return null
+            return listOf(
+                "x-google-min-bitrate=$minKbps",
+                "x-google-start-bitrate=$startKbps",
+                "x-google-max-bitrate=$maxKbps"
+            )
+        }
+
+        companion object {
+            fun fromProtocolValue(value: String?): TvVideoBitrate? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
+    }
+
+    private enum class TvVideoPriority(
+        val protocolValue: String,
+        val degradationPreference: RtpParameters.DegradationPreference,
+        val labelResId: Int,
+    ) {
+        LowLatency(
+            "low_latency",
+            RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+            R.string.tv_main_screen_cast_video_priority_low_latency
+        ),
+        Quality(
+            "quality",
+            RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE,
+            R.string.tv_main_screen_cast_video_priority_quality
+        );
+
+        companion object {
+            fun fromProtocolValue(value: String?): TvVideoPriority? =
+                entries.firstOrNull { it.protocolValue == value }
+        }
     }
 
     private data class TvVideoConfig(
         val resolution: TvVideoResolution,
         val aspectMode: TvVideoAspectMode,
         val bitrate: TvVideoBitrate,
+        val priority: TvVideoPriority,
     ) {
         val width: Int
             get() = resolution.widthFor(aspectMode)
@@ -1826,7 +2041,8 @@ class TvMainScreenCastHost(
             fun default(): TvVideoConfig = TvVideoConfig(
                 resolution = TvVideoResolution.TwoX,
                 aspectMode = TvVideoAspectMode.Native,
-                bitrate = TvVideoBitrate.Medium
+                bitrate = TvVideoBitrate.Medium,
+                priority = TvVideoPriority.LowLatency
             )
         }
     }
@@ -2094,6 +2310,14 @@ class TvMainScreenCastHost(
     companion object {
         private val peerConnectionFactoryInitialized = AtomicBoolean(false)
         private val RTPMAP_H264_REGEX = Regex("""a=rtpmap:(\d+)\s+H264/90000""", RegexOption.IGNORE_CASE)
+        private val FMTP_REGEX = Regex("""a=fmtp:(\d+)\s*(.*)""", RegexOption.IGNORE_CASE)
+        private const val TV_CAST_PREFS_NAME = "azahar_tv_main_screen_cast"
+        private const val PREF_VIDEO_RESOLUTION = "video_resolution"
+        private const val PREF_VIDEO_ASPECT = "video_aspect"
+        private const val PREF_VIDEO_BITRATE = "video_bitrate"
+        private const val PREF_VIDEO_PRIORITY = "video_priority"
+        private const val PREF_AUDIO_MODE = "audio_mode"
+        private const val PREF_AUDIO_CODEC = "audio_codec"
         private const val VIDEO_TRACK_ID = "AZAHAR_TOP_SCREEN"
         private const val AUDIO_TRACK_ID = "AZAHAR_TV_AUDIO"
         private const val AUDIO_DATA_CHANNEL_LABEL = "audio"
@@ -2103,6 +2327,9 @@ class TvMainScreenCastHost(
         private const val ASPECT_RATIO_16_9 = 1
         private const val ASPECT_RATIO_STRETCH = 5
         private const val CAST_FPS = 60
+        private const val TV_CAST_GOP_SECONDS = 2
+        private const val TV_CAST_MAX_B_FRAMES = 0
+        private const val TV_CAST_QP_P_MAX = -1
         private const val NATIVE_SAMPLE_RATE = 32728
         private const val WEB_AUDIO_SAMPLE_RATE = 48000
         private const val AUDIO_CHUNK_FRAMES = 480
@@ -2111,9 +2338,11 @@ class TvMainScreenCastHost(
         private const val RESOLUTION_RADIO_BASE_ID = 30_000
         private const val ASPECT_RADIO_BASE_ID = 32_500
         private const val BITRATE_RADIO_BASE_ID = 35_000
+        private const val VIDEO_PRIORITY_RADIO_BASE_ID = 37_500
         private const val AUDIO_MODE_RADIO_BASE_ID = 40_000
         private const val AUDIO_CODEC_RADIO_BASE_ID = 45_000
         private const val TV_CAST_HTTP_PORT = 41315
+        private const val VIDEO_FRAME_WARNING_DELAY_MS = 3_000L
         private const val HTTP_SOCKET_TIMEOUT_MS = 10_000
         private const val MAX_HTTP_HEADER_BYTES = 16 * 1024
         private const val MAX_WEBSOCKET_PAYLOAD_BYTES = 2 * 1024 * 1024
@@ -2139,5 +2368,6 @@ class TvMainScreenCastHost(
                 )
             }
         }
+
     }
 }
