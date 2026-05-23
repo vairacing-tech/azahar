@@ -287,6 +287,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
 
             GameIconUtils.loadGameIcon(requireActivity(), game, iconView)
         }
+        updateCastMenuTitles()
 
         binding.inGameMenu.setNavigationItemSelectedListener {
             when (it.itemId) {
@@ -348,13 +349,13 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
 
                 R.id.menu_dual_device_cast -> {
                     emulationActivity.toggleDualDeviceCast()
-                    it.title = resources.getString(
-                        if (emulationActivity.isDualDeviceCastRunning()) {
-                            R.string.dual_device_cast_stop
-                        } else {
-                            R.string.dual_device_cast
-                        }
-                    )
+                    updateCastMenuTitles()
+                    true
+                }
+
+                R.id.menu_tv_main_screen_cast -> {
+                    emulationActivity.toggleTvMainScreenCast()
+                    updateCastMenuTitles()
                     true
                 }
 
@@ -1395,6 +1396,23 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
         }
 
         binding.performanceOverlayShowText.layoutParams = params
+    }
+
+    private fun updateCastMenuTitles() {
+        binding.inGameMenu.menu.findItem(R.id.menu_dual_device_cast).title = resources.getString(
+            if (emulationActivity.isDualDeviceCastRunning()) {
+                R.string.dual_device_cast_stop
+            } else {
+                R.string.dual_device_cast
+            }
+        )
+        binding.inGameMenu.menu.findItem(R.id.menu_tv_main_screen_cast).title = resources.getString(
+            if (emulationActivity.isTvMainScreenCastRunning()) {
+                R.string.tv_main_screen_cast_stop
+            } else {
+                R.string.tv_main_screen_cast
+            }
+        )
     }
 
     private fun getBatteryTemperature(): Float {

@@ -181,6 +181,22 @@ object NativeLibrary {
     external fun secondarySurfaceChanged(secondary_surface: Surface)
     external fun secondarySurfaceDestroyed()
 
+    external fun setTvAudioTapEnabled(enabled: Boolean)
+    external fun setTvAudioLocalMute(muted: Boolean)
+
+    @Volatile
+    private var tvAudioFrameCallback: ((ShortArray, Int, Int, Int) -> Unit)? = null
+
+    fun setTvAudioFrameCallback(callback: ((ShortArray, Int, Int, Int) -> Unit)?) {
+        tvAudioFrameCallback = callback
+    }
+
+    @Keep
+    @JvmStatic
+    fun onTvAudioFrame(samples: ShortArray, sampleRate: Int, channels: Int, frames: Int) {
+        tvAudioFrameCallback?.invoke(samples, sampleRate, channels, frames)
+    }
+
     /**
      * Unpauses emulation from a paused state.
      */

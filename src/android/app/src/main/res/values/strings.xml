@@ -2,12 +2,12 @@
 <resources>
 
     <!-- General application strings -->
-    <string name="app_name" translatable="false">Azahar</string>
+    <string name="app_name" translatable="false">Azahar2S</string>
     <string name="app_disclaimer">This software will run applications for the Nintendo 3DS handheld game console. No game titles are included.\n\nBefore you can begin with emulating, please select a folder to store Azahar\'s user data in.\n\nWhat\'s this:\n<a href='https://web.archive.org/web/20240304193549/https://github.com/citra-emu/citra/wiki/Citra-Android-user-data-and-storage'>Wiki - Citra Android user data and storage</a></string>
-    <string name="app_notification_channel_name" translatable="false">Azahar</string>
-    <string name="app_notification_channel_id" translatable="false">Azahar</string>
-    <string name="app_notification_channel_description">Azahar 3DS emulator notifications</string>
-    <string name="app_notification_running">Azahar is Running</string>
+    <string name="app_notification_channel_name" translatable="false">Azahar2S</string>
+    <string name="app_notification_channel_id" translatable="false">Azahar2S</string>
+    <string name="app_notification_channel_description">Azahar2S 3DS emulator notifications</string>
+    <string name="app_notification_running">Azahar2S is Running</string>
     <string name="app_game_install_description">Next, you will need to select an Applications Folder. Azahar will display all of the 3DS ROMs inside of the selected folder in the app.\n\nCIA ROMs, updates and DLC will need to be installed separately by clicking on the folder icon and selecting Install CIA.</string>
 
     <!-- Home Strings -->
@@ -992,7 +992,54 @@
     <string name="dual_device_cast_stop">Stop Dual Device Cast</string>
     <string name="dual_device_cast_waiting">Waiting for receiver…</string>
     <string name="dual_device_cast_connected">Receiver connected</string>
+    <string name="dual_device_cast_receiver_ready">Receiver connected. Start the game when ready.</string>
     <string name="dual_device_cast_stopped">Dual Device Cast stopped</string>
     <string name="dual_device_cast_error">Dual Device Cast error: %1$s</string>
+    <string name="dual_device_cast_play_with_second_screen">Second screen</string>
+    <string name="dual_device_cast_start_game">Start game</string>
+    <string name="dual_device_cast_game_started">Game started</string>
+    <string name="dual_device_cast_vulkan_start_before_game">With Vulkan, start Dual Device Cast from Second screen before launching the game.</string>
+    <string name="dual_device_cast_vulkan_stop_after_game">Vulkan Dual Device Cast keeps its capture surface until the game closes. The dialog was hidden; exit the game to stop the cast fully.</string>
+    <string name="tv_main_screen_cast">TV Main Screen Cast</string>
+    <string name="tv_main_screen_cast_stop">Stop TV Main Screen Cast</string>
+    <string name="tv_main_screen_cast_pairing_title">TV main screen</string>
+    <string name="tv_main_screen_cast_pairing_message">Open this URL on the TV browser:</string>
+    <string name="tv_main_screen_cast_waiting">Waiting for TV...</string>
+    <string name="tv_main_screen_cast_connected">TV connected</string>
+    <string name="tv_main_screen_cast_ready_to_start">TV connected. Start the game when ready.</string>
+    <string name="tv_main_screen_cast_stopped">TV Main Screen Cast stopped</string>
+    <string name="tv_main_screen_cast_error">TV Main Screen Cast error: %1$s</string>
+    <string name="tv_main_screen_cast_play_on_tv">Play on TV</string>
+    <string name="tv_main_screen_cast_start_game">Start game</string>
+    <string name="tv_main_screen_cast_game_started">Game started</string>
+    <string name="tv_main_screen_cast_vulkan_start_before_game">With Vulkan, start TV Main Screen Cast from Play on TV before launching the game.</string>
+    <string name="tv_main_screen_cast_vulkan_stop_after_game">Vulkan TV cast keeps its capture surface until the game closes. The dialog was hidden; exit the game to stop the cast fully.</string>
+    <string name="tv_main_screen_cast_resolution">Video resolution</string>
+    <string name="tv_main_screen_cast_resolution_1x">1x 240p</string>
+    <string name="tv_main_screen_cast_resolution_2x">2x 480p</string>
+    <string name="tv_main_screen_cast_resolution_3x">3x 720p</string>
+    <string name="tv_main_screen_cast_resolution_4x">4x 960p</string>
+    <string name="tv_main_screen_cast_resolution_1080p">1080p</string>
+    <string name="tv_main_screen_cast_aspect">Video aspect</string>
+    <string name="tv_main_screen_cast_aspect_native">Native 5:3</string>
+    <string name="tv_main_screen_cast_aspect_16_9">16:9</string>
+    <string name="tv_main_screen_cast_aspect_fill">Fill</string>
+    <string name="tv_main_screen_cast_bitrate">Video bitrate</string>
+    <string name="tv_main_screen_cast_bitrate_auto">Auto</string>
+    <string name="tv_main_screen_cast_bitrate_low">Low 4 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_medium">Medium 8 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_high">High 14 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_very_high">Very high 24 Mbps</string>
+    <string name="tv_main_screen_cast_bitrate_ultra">Ultra 35 Mbps</string>
+    <string name="tv_main_screen_cast_video_priority">Video priority</string>
+    <string name="tv_main_screen_cast_video_priority_low_latency">Low latency</string>
+    <string name="tv_main_screen_cast_video_priority_quality">Quality</string>
+    <string name="tv_main_screen_cast_audio_mode">Audio output</string>
+    <string name="tv_main_screen_cast_audio_host">Host</string>
+    <string name="tv_main_screen_cast_audio_tv">TV</string>
+    <string name="tv_main_screen_cast_audio_both">Both</string>
+    <string name="tv_main_screen_cast_audio_codec">TV audio codec</string>
+    <string name="tv_main_screen_cast_audio_codec_pcm">PCM low latency</string>
+    <string name="tv_main_screen_cast_audio_codec_opus">Opus low bandwidth</string>
 
 </resources>

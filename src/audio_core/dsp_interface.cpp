@@ -3,6 +3,8 @@
 // Refer to the license.txt file included.
 
 #include <cstddef>
+#include <cstring>
+#include <mutex>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
@@ -12,6 +14,21 @@
 #include "core/dumping/backend.h"
 
 namespace AudioCore {
+
+namespace {
+std::mutex output_audio_tap_mutex;
+OutputAudioTap output_audio_tap;
+std::atomic<bool> output_audio_local_mute = false;
+} // namespace
+
+void SetOutputAudioTap(OutputAudioTap callback) {
+    std::scoped_lock lock(output_audio_tap_mutex);
+    output_audio_tap = std::move(callback);
+}
+
+void SetOutputAudioLocalMute(bool muted) {
+    output_audio_local_mute = muted;
+}
 
 DspInterface::DspInterface(Core::System& system_) : system(system_) {}
 
@@ -116,6 +133,19 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
             buffer[i * 2 + 0] = static_cast<s16>(buffer[i * 2 + 0] * volume_scale_factor);
             buffer[i * 2 + 1] = static_cast<s16>(buffer[i * 2 + 1] * volume_scale_factor);
         }
+    }
+
+    OutputAudioTap tap;
+    {
+        std::scoped_lock lock(output_audio_tap_mutex);
+        tap = output_audio_tap;
+    }
+    if (tap) {
+        tap(buffer, num_frames, native_sample_rate, 2);
+    }
+
+    if (output_audio_local_mute) {
+        std::memset(buffer, 0, num_frames * 2 * sizeof(s16));
     }
 }
 

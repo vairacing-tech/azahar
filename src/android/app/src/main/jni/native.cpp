@@ -6,6 +6,7 @@
 #include <codecvt>
 #include <thread>
 #include <dlfcn.h>
+#include <vector>
 
 #include <android/api-level.h>
 #include <android/native_window_jni.h>
@@ -75,6 +76,7 @@ namespace {
 
 ANativeWindow* s_surface;
 ANativeWindow* s_secondary_surface;
+std::vector<ANativeWindow*> s_retired_secondary_surfaces;
 
 enum class CompressionStatus : jint {
     Success = 0,
@@ -102,6 +104,21 @@ std::mutex running_mutex;
 std::condition_variable running_cv;
 
 std::string inserted_cartridge;
+
+void RetireSecondarySurface() {
+    if (s_secondary_surface != nullptr) {
+        s_retired_secondary_surfaces.push_back(s_secondary_surface);
+        s_secondary_surface = nullptr;
+    }
+}
+
+void ReleaseRetiredSecondarySurfaces() {
+    RetireSecondarySurface();
+    for (ANativeWindow* surface : s_retired_secondary_surfaces) {
+        ANativeWindow_release(surface);
+    }
+    s_retired_secondary_surfaces.clear();
+}
 
 } // Anonymous namespace
 
@@ -160,6 +177,8 @@ static void TryShutdown() {
     if (secondary_window) {
         secondary_window.reset();
     }
+
+    ReleaseRetiredSecondarySurfaces();
 
     InputManager::Shutdown();
     MicroProfileShutdown();
@@ -378,14 +397,12 @@ void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceChanged(JNIEnv* env
                                                                      jobject surf) {
     auto& system = Core::System::GetInstance();
 
-    if (s_secondary_surface) {
-        ANativeWindow_release(s_secondary_surface);
-        s_secondary_surface = nullptr;
-    }
-    s_secondary_surface = ANativeWindow_fromSurface(env, surf);
-    if (!s_secondary_surface) {
+    ANativeWindow* new_surface = ANativeWindow_fromSurface(env, surf);
+    if (!new_surface) {
         return;
     }
+    RetireSecondarySurface();
+    s_secondary_surface = new_surface;
 
     bool notify = false;
     if (secondary_window) {
@@ -405,12 +422,42 @@ void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceChanged(JNIEnv* env
 
 void Java_org_citra_citra_1emu_NativeLibrary_secondarySurfaceDestroyed(
     JNIEnv* env, [[maybe_unused]] jobject obj) {
-    if (s_secondary_surface != nullptr) {
-        ANativeWindow_release(s_secondary_surface);
-        s_secondary_surface = nullptr;
-    }
+    RetireSecondarySurface();
 
     LOG_INFO(Frontend, "Secondary Surface Destroyed");
+}
+
+void Java_org_citra_citra_1emu_NativeLibrary_setTvAudioTapEnabled(
+    [[maybe_unused]] JNIEnv* env, [[maybe_unused]] jobject obj, jboolean enabled) {
+    if (!enabled) {
+        AudioCore::SetOutputAudioTap(nullptr);
+        return;
+    }
+
+    AudioCore::SetOutputAudioTap(
+        [](const s16* samples, std::size_t frames, int sample_rate, int channels) {
+            JNIEnv* env = IDCache::GetEnvForThread();
+            const auto sample_count = static_cast<jsize>(frames * channels);
+            jshortArray java_samples = env->NewShortArray(sample_count);
+            if (!java_samples) {
+                return;
+            }
+            env->SetShortArrayRegion(java_samples, 0, sample_count,
+                                     reinterpret_cast<const jshort*>(samples));
+            env->CallStaticVoidMethod(IDCache::GetNativeLibraryClass(),
+                                      IDCache::GetTvAudioFrameCallback(), java_samples,
+                                      static_cast<jint>(sample_rate), static_cast<jint>(channels),
+                                      static_cast<jint>(frames));
+            env->DeleteLocalRef(java_samples);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        });
+}
+
+void Java_org_citra_citra_1emu_NativeLibrary_setTvAudioLocalMute(
+    [[maybe_unused]] JNIEnv* env, [[maybe_unused]] jobject obj, jboolean muted) {
+    AudioCore::SetOutputAudioLocalMute(muted);
 }
 
 void Java_org_citra_citra_1emu_NativeLibrary_surfaceDestroyed([[maybe_unused]] JNIEnv* env,

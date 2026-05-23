@@ -14,10 +14,12 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Surface
+import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
@@ -53,10 +55,13 @@ class DualDeviceCastHost(
     private val settings: Settings,
     private val releaseSecondaryDisplay: () -> Unit,
     private val restoreSecondaryDisplay: () -> Unit,
+    private val protectNativeSurface: Boolean = false,
+    private val onStopped: () -> Unit = {},
 ) : Closeable {
     private val executor: ExecutorService = Executors.newCachedThreadPool()
     private val running = AtomicBoolean(false)
     private val token = UUID.randomUUID().toString().replace("-", "")
+    private val gameStartRequested = AtomicBoolean(false)
 
     private var serverSocket: ServerSocket? = null
     private var controlSocket: Socket? = null
@@ -66,6 +71,10 @@ class DualDeviceCastHost(
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
     private var pairingDialog: Dialog? = null
+    private var pairingStatusText: TextView? = null
+    private var startGameButton: Button? = null
+    private var onStartGame: (() -> Unit)? = null
+    private var onCancelBeforeGame: (() -> Unit)? = null
     private var castConfig = CastConfig.default()
     private var sequence = 0
 
@@ -93,7 +102,13 @@ class DualDeviceCastHost(
         }
     }
 
-    fun showPairingDialog() {
+    fun showPairingDialog(
+        onStartGame: (() -> Unit)? = null,
+        onCancelBeforeGame: (() -> Unit)? = null,
+    ) {
+        this.onStartGame = onStartGame
+        this.onCancelBeforeGame = onCancelBeforeGame
+
         val qr = createQrBitmap(pairingUri(), 720)
         val density = activity.resources.displayMetrics.density
         val content = LinearLayout(activity).apply {
@@ -115,6 +130,7 @@ class DualDeviceCastHost(
             setText(R.string.dual_device_cast_waiting)
             textAlignment = TextView.TEXT_ALIGNMENT_CENTER
         }
+        pairingStatusText = status
         content.addView(message)
         content.addView(image)
         content.addView(status)
@@ -122,8 +138,30 @@ class DualDeviceCastHost(
         pairingDialog = MaterialAlertDialogBuilder(activity)
             .setTitle(R.string.dual_device_cast_pairing_title)
             .setView(content)
-            .setNegativeButton(android.R.string.cancel) { _, _ -> close() }
+            .apply {
+                if (onStartGame != null) {
+                    setPositiveButton(R.string.dual_device_cast_start_game, null)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel) { _, _ -> handlePairingCancel() }
+            .setOnCancelListener { handlePairingCancel() }
             .show()
+
+        if (onStartGame != null) {
+            startGameButton = (pairingDialog as? AlertDialog)?.getButton(AlertDialog.BUTTON_POSITIVE)
+            startGameButton?.isEnabled = false
+            startGameButton?.setOnClickListener {
+                if (!gameStartRequested.compareAndSet(false, true)) {
+                    return@setOnClickListener
+                }
+                onStartGame()
+                it.isEnabled = false
+                (it as? TextView)?.setText(R.string.dual_device_cast_game_started)
+                pairingDialog?.setOnCancelListener(null)
+                pairingDialog?.dismiss()
+                pairingDialog = null
+            }
+        }
     }
 
     private fun pairingUri(): String {
@@ -180,13 +218,22 @@ class DualDeviceCastHost(
                 .write("OK ${castConfig.width} ${castConfig.height} $CAST_FPS ${castConfig.aspectMode.protocolValue}\n".toByteArray())
             activity.runOnUiThread {
                 Toast.makeText(activity, R.string.dual_device_cast_connected, Toast.LENGTH_SHORT).show()
-                pairingDialog?.dismiss()
-                pairingDialog = null
             }
 
             startEncoder(castConfig)
+            activity.runOnUiThread {
+                pairingStatusText?.setText(R.string.dual_device_cast_receiver_ready)
+                startGameButton?.isEnabled = true
+            }
+            if (onStartGame == null) {
+                activity.runOnUiThread {
+                    pairingDialog?.dismiss()
+                    pairingDialog = null
+                }
+            }
+
             readControlMessages(reader)
-            close()
+            requestStop()
         } catch (e: Exception) {
             if (running.get()) {
                 Log.error("[DualDeviceCastHost] ${e.message}")
@@ -198,7 +245,7 @@ class DualDeviceCastHost(
                     ).show()
                 }
             }
-            close()
+            requestStop()
         }
     }
 
@@ -236,6 +283,26 @@ class DualDeviceCastHost(
         applyLowLatencyRuntimeParameters(codec)
         NativeLibrary.secondarySurfaceChanged(encoderSurface!!)
         executor.execute(::drainEncoder)
+    }
+
+    fun onEmulationStarted() {
+        if (protectNativeSurface) {
+            Log.info("[DualDeviceCastHost] Encoder surface owned by Vulkan; refreshing framebuffer")
+            try {
+                NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+            } catch (e: Exception) {
+                Log.error("[DualDeviceCastHost] Vulkan framebuffer refresh failed: ${e.message}")
+            }
+            return
+        }
+        val surface = encoderSurface ?: return
+        try {
+            Log.info("[DualDeviceCastHost] Reattaching encoder surface after emulation start")
+            NativeLibrary.secondarySurfaceChanged(surface)
+            NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
+        } catch (e: Exception) {
+            Log.error("[DualDeviceCastHost] Encoder surface reattach failed: ${e.message}")
+        }
     }
 
     private fun selectHardwareAvcEncoder(config: CastConfig): MediaCodecInfo {
@@ -312,13 +379,19 @@ class DualDeviceCastHost(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, CAST_FPS)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, CAST_GOP_SECONDS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setInteger(MediaFormat.KEY_LATENCY, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_MAX_B_FRAMES, CAST_MAX_B_FRAMES)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                setInteger(MediaFormat.KEY_VIDEO_QP_P_MAX, CAST_QP_P_MAX)
             }
             if (tuned) {
                 applyEncoderTuning(encoderInfo)
@@ -456,7 +529,7 @@ class DualDeviceCastHost(
             } catch (e: Exception) {
                 if (running.get()) {
                     Log.error("[DualDeviceCastHost] Encoder drain failed: ${e.message}")
-                    close()
+                    requestStop()
                 }
                 break
             } finally {
@@ -501,12 +574,30 @@ class DualDeviceCastHost(
             } catch (e: Exception) {
                 if (running.get()) {
                     Log.error("[DualDeviceCastHost] Video send failed: ${e.message}")
-                    close()
+                    requestStop()
                 }
                 return
             }
             offset += payloadSize
         }
+    }
+
+    fun requestStop(): Boolean {
+        if (protectNativeSurface && NativeLibrary.isRunning()) {
+            activity.runOnUiThread {
+                pairingDialog?.dismiss()
+                pairingDialog = null
+                Toast.makeText(
+                    activity,
+                    R.string.dual_device_cast_vulkan_stop_after_game,
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            return false
+        }
+
+        close()
+        return true
     }
 
     override fun close() {
@@ -523,12 +614,33 @@ class DualDeviceCastHost(
         videoSocket.closeQuietly()
         executor.shutdownNow()
         activity.runOnUiThread {
+            pairingDialog?.setOnCancelListener(null)
             pairingDialog?.dismiss()
             pairingDialog = null
+            pairingStatusText = null
+            startGameButton = null
             restoreLayout()
             restoreSecondaryDisplay()
+            onStopped()
             Toast.makeText(activity, R.string.dual_device_cast_stopped, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun handlePairingCancel() {
+        if (protectNativeSurface && NativeLibrary.isRunning()) {
+            pairingDialog?.setOnCancelListener(null)
+            pairingDialog?.dismiss()
+            pairingDialog = null
+            Toast.makeText(
+                activity,
+                R.string.dual_device_cast_vulkan_stop_after_game,
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        requestStop()
+        onCancelBeforeGame?.invoke()
     }
 
     private fun closeEncoder() {
@@ -636,6 +748,9 @@ class DualDeviceCastHost(
         private const val MIN_MULTIPLIER = 1
         private const val MAX_MULTIPLIER = 4
         private const val CAST_FPS = 60
+        private const val CAST_GOP_SECONDS = 1
+        private const val CAST_MAX_B_FRAMES = 0
+        private const val CAST_QP_P_MAX = 34
         private const val BASE_BITRATE = 4_000_000
         private const val MIN_BITRATE = 1_500_000
         private const val MAX_BITRATE = 12_000_000

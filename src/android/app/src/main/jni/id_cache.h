@@ -31,6 +31,7 @@ jmethodID GetPortraitScreenLayout();
 jmethodID GetExitEmulationActivity();
 jmethodID GetRequestCameraPermission();
 jmethodID GetRequestMicPermission();
+jmethodID GetTvAudioFrameCallback();
 
 jclass GetCheatClass();
 jfieldID GetCheatPointer();

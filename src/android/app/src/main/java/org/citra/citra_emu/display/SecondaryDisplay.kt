@@ -21,6 +21,7 @@ class SecondaryDisplay(val context: Context) : DisplayManager.DisplayListener {
     private var pres: SecondaryDisplayPresentation? = null
     private val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
     private val vd: VirtualDisplay
+    private var presentationSuppressed = false
 
     init {
         vd = displayManager.createVirtualDisplay(
@@ -35,10 +36,16 @@ class SecondaryDisplay(val context: Context) : DisplayManager.DisplayListener {
     }
 
     fun updateSurface() {
+        if (presentationSuppressed) {
+            return
+        }
         NativeLibrary.secondarySurfaceChanged(pres!!.getSurfaceHolder().surface)
     }
 
     fun destroySurface() {
+        if (presentationSuppressed) {
+            return
+        }
         NativeLibrary.secondarySurfaceDestroyed()
     }
 
@@ -63,6 +70,11 @@ class SecondaryDisplay(val context: Context) : DisplayManager.DisplayListener {
     }
 
     fun updateDisplay() {
+        if (presentationSuppressed) {
+            releasePresentation()
+            return
+        }
+
         // return early if the parent context is dead or dying
         if (context is android.app.Activity && (context.isFinishing || context.isDestroyed)) {
             return
@@ -100,6 +112,16 @@ class SecondaryDisplay(val context: Context) : DisplayManager.DisplayListener {
             pres?.dismiss()
         } catch (_: Exception) { }
         pres = null
+    }
+
+    fun suspendPresentation() {
+        presentationSuppressed = true
+        releasePresentation()
+    }
+
+    fun resumePresentation() {
+        presentationSuppressed = false
+        updateDisplay()
     }
 
     fun releaseVD() {
