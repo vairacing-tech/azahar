@@ -59,7 +59,6 @@ import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.AzaharHardwareVideoEncoderFactory
 import org.webrtc.DataChannel
-import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
@@ -74,6 +73,8 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoCodecInfo
+import org.webrtc.VideoDecoder
+import org.webrtc.VideoDecoderFactory
 import org.webrtc.VideoEncoder
 import org.webrtc.VideoEncoderFactory
 import org.webrtc.VideoFrame
@@ -407,7 +408,7 @@ class TvMainScreenCastHost(
 
     private fun startWebRtcCapture() {
         ensurePeerConnectionFactoryInitialized(activity.applicationContext)
-        val egl = EglBase.create()
+        val egl = EglBase.create(null as EglBase.Context?, EglBase.CONFIG_RECORDABLE)
         eglBase = egl
         val codecPolicy = H264HardwareCodecPolicy()
         val encoderFactory = H264OnlyVideoEncoderFactory(
@@ -439,7 +440,7 @@ class TvMainScreenCastHost(
         val factory = PeerConnectionFactory.builder()
             .setAudioDeviceModule(audioModule)
             .setVideoEncoderFactory(encoderFactory)
-            .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
+            .setVideoDecoderFactory(DisabledVideoDecoderFactory())
             .createPeerConnectionFactory()
         peerConnectionFactory = factory
 
@@ -2221,6 +2222,12 @@ class TvMainScreenCastHost(
                 .filter { it.name.equals("H264", ignoreCase = true) }
                 .toTypedArray()
         }
+    }
+
+    private class DisabledVideoDecoderFactory : VideoDecoderFactory {
+        override fun createDecoder(info: VideoCodecInfo): VideoDecoder? = null
+
+        override fun getSupportedCodecs(): Array<VideoCodecInfo> = emptyArray()
     }
 
     private class SimpleSdpObserver(
