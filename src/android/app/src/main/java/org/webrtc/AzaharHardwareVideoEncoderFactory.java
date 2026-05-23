@@ -140,9 +140,21 @@ public class AzaharHardwareVideoEncoderFactory implements VideoEncoderFactory {
     }
 
     private boolean isH264HighProfileSupported(MediaCodecInfo codecInfo) {
-        return enableH264HighProfile &&
-                Build.VERSION.SDK_INT > Build.VERSION_CODES.M &&
-                codecInfo.getName().startsWith(MediaCodecUtils.EXYNOS_PREFIX);
+        if (!enableH264HighProfile || Build.VERSION.SDK_INT <= Build.VERSION_CODES.M) {
+            return false;
+        }
+        try {
+            MediaCodecInfo.CodecCapabilities capabilities =
+                    codecInfo.getCapabilitiesForType(VideoCodecMimeType.H264.mimeType());
+            for (MediaCodecInfo.CodecProfileLevel profileLevel : capabilities.profileLevels) {
+                if (profileLevel.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileHigh) {
+                    return true;
+                }
+            }
+        } catch (IllegalArgumentException e) {
+            Logging.w(TAG, "Could not query H.264 profile support for " + codecInfo.getName());
+        }
+        return false;
     }
 
     private static class TuningMediaCodecWrapperFactory implements MediaCodecWrapperFactory {

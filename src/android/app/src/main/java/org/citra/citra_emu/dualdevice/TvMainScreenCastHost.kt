@@ -414,7 +414,7 @@ class TvMainScreenCastHost(
         val encoderFactory = H264OnlyVideoEncoderFactory(
             AzaharHardwareVideoEncoderFactory(
                 egl.eglBaseContext,
-                false,
+                true,
                 codecPolicy,
                 TV_CAST_GOP_SECONDS,
                 TV_CAST_MAX_B_FRAMES,
@@ -1369,7 +1369,7 @@ class TvMainScreenCastHost(
             if (line.startsWith("m=video ")) {
                 val parts = line.split(" ")
                 if (parts.size > 3) {
-                    (parts.take(3) + parts.drop(3).filter { it in h264Payloads }).joinToString(" ")
+                    (parts.take(3) + sortedH264Payloads(lines, h264Payloads)).joinToString(" ")
                 } else {
                     line
                 }
@@ -1380,6 +1380,34 @@ class TvMainScreenCastHost(
         return applyVideoBandwidthLines(
             applyH264BitrateFmtp(h264OnlyLines, h264Payloads)
         ).joinToString("\r\n")
+    }
+
+    private fun sortedH264Payloads(lines: List<String>, h264Payloads: Set<String>): List<String> {
+        val profileRankByPayload = lines.mapNotNull { line ->
+            val match = FMTP_REGEX.matchEntire(line) ?: return@mapNotNull null
+            match.groupValues[1] to h264ProfileRank(match.groupValues[2])
+        }.toMap()
+        return h264Payloads.sortedWith(
+            compareByDescending<String> { profileRankByPayload[it] ?: 0 }.thenBy { it.toIntOrNull() ?: 0 }
+        )
+    }
+
+    private fun h264ProfileRank(fmtpParameters: String): Int {
+        val profileLevelId = H264_PROFILE_LEVEL_ID_REGEX.find(fmtpParameters)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.lowercase(Locale.US)
+            ?: return 0
+        val profileRank = when (profileLevelId.take(2)) {
+            "64", "6e", "7a", "f4" -> 3
+            "4d" -> 2
+            "42" -> 1
+            else -> 0
+        }
+        val packetizationBonus = if (
+            fmtpParameters.contains("packetization-mode=1", ignoreCase = true)
+        ) 1 else 0
+        return profileRank * 10 + packetizationBonus
     }
 
     private fun applyH264BitrateFmtp(lines: List<String>, h264Payloads: Set<String>): List<String> {
@@ -1606,7 +1634,21 @@ class TvMainScreenCastHost(
       const senderCaps = window.RTCRtpSender && RTCRtpSender.getCapabilities
         ? RTCRtpSender.getCapabilities('video') : null;
       const codecs = (receiverCaps && receiverCaps.codecs) || (senderCaps && senderCaps.codecs) || [];
-      return codecs.filter((codec) => String(codec.mimeType).toLowerCase() === 'video/h264');
+      return codecs
+        .filter((codec) => String(codec.mimeType).toLowerCase() === 'video/h264')
+        .sort((a, b) => h264ProfileRank(b) - h264ProfileRank(a));
+    }
+
+    function h264ProfileRank(codec) {
+      const match = /profile-level-id=([0-9a-fA-F]{6})/.exec(String(codec.sdpFmtpLine || ''));
+      if (!match) return 0;
+      const fmtp = String(codec.sdpFmtpLine || '');
+      const profile = match[1].slice(0, 2).toLowerCase();
+      let rank = 0;
+      if (profile === '64' || profile === '6e' || profile === '7a' || profile === 'f4') rank = 3;
+      else if (profile === '4d') rank = 2;
+      else if (profile === '42') rank = 1;
+      return rank * 10 + (fmtp.includes('packetization-mode=1') ? 1 : 0);
     }
 
     function opusCodecs() {
@@ -1983,9 +2025,9 @@ class TvMainScreenCastHost(
         Auto("auto", null, null, null, R.string.tv_main_screen_cast_bitrate_auto),
         Low("low", 1_500_000, 3_000_000, 4_000_000, R.string.tv_main_screen_cast_bitrate_low),
         Medium("medium", 2_000_000, 6_000_000, 8_000_000, R.string.tv_main_screen_cast_bitrate_medium),
-        High("high", 3_000_000, 10_000_000, 14_000_000, R.string.tv_main_screen_cast_bitrate_high),
-        VeryHigh("very_high", 4_000_000, 16_000_000, 24_000_000, R.string.tv_main_screen_cast_bitrate_very_high),
-        Ultra("ultra", 5_000_000, 22_000_000, 35_000_000, R.string.tv_main_screen_cast_bitrate_ultra),
+        High("high", 5_000_000, 16_000_000, 28_000_000, R.string.tv_main_screen_cast_bitrate_high),
+        VeryHigh("very_high", 10_000_000, 30_000_000, 55_000_000, R.string.tv_main_screen_cast_bitrate_very_high),
+        Ultra("ultra", 18_000_000, 48_000_000, 85_000_000, R.string.tv_main_screen_cast_bitrate_ultra),
         ;
 
         fun fmtpParameters(): List<String>? {
@@ -2318,6 +2360,7 @@ class TvMainScreenCastHost(
         private val peerConnectionFactoryInitialized = AtomicBoolean(false)
         private val RTPMAP_H264_REGEX = Regex("""a=rtpmap:(\d+)\s+H264/90000""", RegexOption.IGNORE_CASE)
         private val FMTP_REGEX = Regex("""a=fmtp:(\d+)\s*(.*)""", RegexOption.IGNORE_CASE)
+        private val H264_PROFILE_LEVEL_ID_REGEX = Regex("""(?:^|[;\s])profile-level-id=([0-9a-fA-F]{6})(?:$|[;\s])""")
         private const val TV_CAST_PREFS_NAME = "azahar_tv_main_screen_cast"
         private const val PREF_VIDEO_RESOLUTION = "video_resolution"
         private const val PREF_VIDEO_ASPECT = "video_aspect"
@@ -2336,7 +2379,7 @@ class TvMainScreenCastHost(
         private const val CAST_FPS = 60
         private const val TV_CAST_GOP_SECONDS = 2
         private const val TV_CAST_MAX_B_FRAMES = 0
-        private const val TV_CAST_QP_P_MAX = -1
+        private const val TV_CAST_QP_P_MAX = 34
         private const val NATIVE_SAMPLE_RATE = 32728
         private const val WEB_AUDIO_SAMPLE_RATE = 48000
         private const val AUDIO_CHUNK_FRAMES = 480
@@ -2370,7 +2413,7 @@ class TvMainScreenCastHost(
             if (peerConnectionFactoryInitialized.compareAndSet(false, true)) {
                 PeerConnectionFactory.initialize(
                     PeerConnectionFactory.InitializationOptions.builder(context)
-                        .setFieldTrials("WebRTC-H264HighProfile/Disabled/")
+                        .setFieldTrials("WebRTC-H264HighProfile/Enabled/")
                         .createInitializationOptions()
                 )
             }
