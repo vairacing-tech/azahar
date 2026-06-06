@@ -349,8 +349,8 @@ void Config::Reload() {
             std::string(DefaultINI::android_config_default_file_content)
                     .find(key_declaration_string) == std::string::npos) {
             ASSERT_MSG(false,
-                       "Validation of default content config failed: Missing or malformed key "
-                       "declaration {}",
+                        "Validation of default config content (jni/default_ini.h) failed: Missing "
+                        "declaration for key '{}'",
                        *key);
         }
     }

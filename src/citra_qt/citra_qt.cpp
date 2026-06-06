@@ -57,7 +57,9 @@
 #include "citra_qt/debugger/graphics/graphics_vertex_shader.h"
 #include "citra_qt/debugger/ipc/recorder.h"
 #include "citra_qt/debugger/lle_service_modules.h"
+#if MICROPROFILE_ENABLED
 #include "citra_qt/debugger/profiler.h"
+#endif
 #include "citra_qt/debugger/registers.h"
 #include "citra_qt/debugger/wait_tree.h"
 #ifdef USE_DISCORD_PRESENCE
@@ -712,11 +714,6 @@ void GMainWindow::InitializeDebugWidgets() {
     microProfileDialog = new MicroProfileDialog(this);
     microProfileDialog->hide();
     debug_menu->addAction(microProfileDialog->toggleViewAction());
-#else
-    auto micro_profile_stub = new QAction(tr("MicroProfile (unavailable)"), this);
-    micro_profile_stub->setEnabled(false);
-    micro_profile_stub->setChecked(false);
-    debug_menu->addAction(micro_profile_stub);
 #endif
 
     registersWidget = new RegistersWidget(system, this);
@@ -879,6 +876,8 @@ void GMainWindow::InitializeHotkeys() {
     link_action_shortcut(ui->action_Debug_Pause, QStringLiteral("Debug Pause"));
     link_action_shortcut(ui->action_Debug_Resume, QStringLiteral("Debug Resume"));
     link_action_shortcut(ui->action_Debug_Step, QStringLiteral("Debug Step"), false, true);
+    link_action_shortcut(ui->action_Debug_Unschedule_All, QStringLiteral("Debug Unschedule All"));
+    link_action_shortcut(ui->action_Debug_Schedule_All, QStringLiteral("Debug Schedule All"));
     link_action_shortcut(ui->action_Screen_Layout_Swap_Screens, QStringLiteral("Swap Screens"));
     link_action_shortcut(ui->action_Screen_Layout_Upright_Screens,
                          QStringLiteral("Rotate Screens Upright"));
@@ -1209,6 +1208,10 @@ void GMainWindow::ConnectMenuEvents() {
             emu_thread->ExecStep();
         }
     });
+    connect_menu(ui->action_Debug_Unschedule_All,
+                 [this] { system.DebugUnscheduleAllThreadsFromFrontend(true); });
+    connect_menu(ui->action_Debug_Schedule_All,
+                 [this] { system.DebugUnscheduleAllThreadsFromFrontend(false); });
 
     // Tools
     connect_menu(ui->action_Compress_ROM_File, &GMainWindow::OnCompressFile);
