@@ -32,6 +32,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -67,7 +68,12 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     private lateinit var overlayView: LinearLayout
     private lateinit var statusText: TextView
     private var selectedResolution = ResolutionMultiplier.X2
-    private var selectedAspectMode = AspectMode.FourThree
+    private var selectedAspectMode = AspectMode.Native
+    private var selectedScreen = StreamScreen.Touch
+    private var selectedCodec = VideoCodec.Avc
+    private var selectedFrameRate = FrameRate.Fps60
+    private var selectedBitrate = VideoBitrate.Auto
+    private var remoteTouchEnabled = true
     private var decoder: MediaCodec? = null
     private var controlSocket: Socket? = null
     private var controlWriter: PrintWriter? = null
@@ -136,6 +142,7 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         surfaceView = AspectSurfaceView(this).apply {
             aspectMode = selectedAspectMode
+            nativeAspectRatio = selectedScreen.nativeAspectRatio
             holder.addCallback(this@MainActivity)
             keepScreenOn = true
             setOnTouchListener(::onTouch)
@@ -152,6 +159,16 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             setText(R.string.scan_qr)
             setOnClickListener { requestCameraThenScan() }
         }
+        val screenLabel = settingsLabel(R.string.stream_screen)
+        val screenSpinner = settingsSpinner(
+            StreamScreen.entries.map { getString(it.labelResId) },
+            StreamScreen.entries.indexOf(selectedScreen)
+        ) { position ->
+            selectedScreen = StreamScreen.entries[position]
+            remoteTouchEnabled = selectedScreen.touchEnabled
+            surfaceView.nativeAspectRatio = selectedScreen.nativeAspectRatio
+            saveSettings()
+        }
         val resolutionLabel = settingsLabel(R.string.resolution_multiplier)
         val resolutionSpinner = settingsSpinner(
             ResolutionMultiplier.entries.map { it.label },
@@ -160,9 +177,33 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             selectedResolution = ResolutionMultiplier.entries[position]
             saveSettings()
         }
+        val codecLabel = settingsLabel(R.string.video_codec)
+        val codecSpinner = settingsSpinner(
+            VideoCodec.entries.map { getString(it.labelResId) },
+            VideoCodec.entries.indexOf(selectedCodec)
+        ) { position ->
+            selectedCodec = VideoCodec.entries[position]
+            saveSettings()
+        }
+        val frameRateLabel = settingsLabel(R.string.frame_rate)
+        val frameRateSpinner = settingsSpinner(
+            FrameRate.entries.map { getString(it.labelResId) },
+            FrameRate.entries.indexOf(selectedFrameRate)
+        ) { position ->
+            selectedFrameRate = FrameRate.entries[position]
+            saveSettings()
+        }
+        val bitrateLabel = settingsLabel(R.string.video_bitrate)
+        val bitrateSpinner = settingsSpinner(
+            VideoBitrate.entries.map { getString(it.labelResId) },
+            VideoBitrate.entries.indexOf(selectedBitrate)
+        ) { position ->
+            selectedBitrate = VideoBitrate.entries[position]
+            saveSettings()
+        }
         val aspectLabel = settingsLabel(R.string.aspect_mode)
         val aspectSpinner = settingsSpinner(
-            AspectMode.entries.map { it.label },
+            AspectMode.entries.map { getString(it.labelResId) },
             AspectMode.entries.indexOf(selectedAspectMode)
         ) { position ->
             selectedAspectMode = AspectMode.entries[position]
@@ -175,8 +216,16 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             val padding = (16 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding, padding, padding)
             addView(statusText)
+            addView(screenLabel)
+            addView(screenSpinner)
             addView(resolutionLabel)
             addView(resolutionSpinner)
+            addView(codecLabel)
+            addView(codecSpinner)
+            addView(frameRateLabel)
+            addView(frameRateSpinner)
+            addView(bitrateLabel)
+            addView(bitrateSpinner)
             addView(aspectLabel)
             addView(aspectSpinner)
             addView(scanButton)
@@ -189,7 +238,11 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
                 Gravity.CENTER
             )
         )
-        root.addView(overlayView, FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        root.addView(
+            ScrollView(this).apply { addView(overlayView) },
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
         setContentView(root)
     }
 
@@ -290,7 +343,9 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             controlWriter = writer
             writer.println(
                 "HELLO ${session.token} ${udp.localPort} " +
-                    "${selectedResolution.multiplier} ${selectedAspectMode.protocolValue}"
+                    "${selectedResolution.multiplier} ${selectedAspectMode.protocolValue} " +
+                    "${selectedCodec.protocolValue} ${selectedFrameRate.fps} " +
+                    "${selectedBitrate.protocolValue} ${selectedScreen.protocolValue}"
             )
             val response = reader.readLine() ?: throw IllegalStateException("empty host response")
             val parts = response.split(" ")
@@ -299,7 +354,16 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             }
             val width = parts[1].toInt()
             val height = parts[2].toInt()
-            startDecoder(surface, width, height)
+            val fps = parts.getOrNull(3)?.toIntOrNull() ?: selectedFrameRate.fps
+            val aspectMode = AspectMode.fromProtocolValue(parts.getOrNull(4))
+            val codec = VideoCodec.fromProtocolValue(parts.getOrNull(5))
+            remoteTouchEnabled = parts.getOrNull(7)?.equals("true", ignoreCase = true)
+                ?: selectedScreen.touchEnabled
+            runOnUiThread {
+                surfaceView.nativeAspectRatio = width.toFloat() / height.toFloat()
+                surfaceView.aspectMode = aspectMode
+            }
+            startDecoder(surface, codec, width, height, fps)
             runOnUiThread {
                 statusText.setText(R.string.connected)
                 overlayView.visibility = View.GONE
@@ -318,22 +382,33 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun startDecoder(surface: Surface, width: Int, height: Int) {
-        val decoderInfo = selectHardwareAvcDecoder(width, height)
-        decoder = createConfiguredDecoder(decoderInfo, surface, width, height).apply {
+    private fun startDecoder(
+        surface: Surface,
+        codec: VideoCodec,
+        width: Int,
+        height: Int,
+        fps: Int,
+    ) {
+        val decoderInfo = selectHardwareDecoder(codec, width, height, fps)
+        decoder = createConfiguredDecoder(decoderInfo, codec, surface, width, height, fps).apply {
             start()
             applyLowLatencyRuntimeParameters(this)
         }
     }
 
-    private fun selectHardwareAvcDecoder(width: Int, height: Int): MediaCodecInfo {
+    private fun selectHardwareDecoder(
+        codec: VideoCodec,
+        width: Int,
+        height: Int,
+        fps: Int,
+    ): MediaCodecInfo {
         val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
             .filter {
                 !it.isEncoder &&
-                    it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    it.supportedTypes.any { type -> type.equals(codec.mimeType, true) } &&
                     it.isHardwareCodec() &&
                     !it.isSecureOrTunneledCodec() &&
-                    it.supportsAvcSize(width, height, CAST_FPS)
+                    it.supportsVideoSize(codec.mimeType, width, height, fps)
             }
             .sortedWith(
                 compareByDescending<MediaCodecInfo> { it.preferenceScore() }
@@ -341,38 +416,55 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
             )
 
         val decoderInfo = candidates.firstOrNull()
-            ?: throw IllegalStateException("No hardware AVC decoder")
+            ?: throw IllegalStateException("No hardware ${codec.displayName} decoder")
         val vendor = if (decoderInfo.isQualcommCodec()) "Qualcomm" else "hardware"
-        Log.i(TAG, "Using $vendor decoder ${decoderInfo.name} ${width}x${height}@$CAST_FPS")
+        Log.i(TAG, "Using $vendor ${codec.displayName} decoder ${decoderInfo.name} ${width}x${height}@$fps")
         return decoderInfo
     }
 
     private fun createConfiguredDecoder(
         decoderInfo: MediaCodecInfo,
+        codec: VideoCodec,
         surface: Surface,
         width: Int,
         height: Int,
+        fps: Int,
     ): MediaCodec {
-        return tryCreateConfiguredDecoder(decoderInfo, surface, width, height, tuned = true)
-            ?: tryCreateConfiguredDecoder(decoderInfo, surface, width, height, tuned = false)
-            ?: throw IllegalStateException("Unable to configure hardware AVC decoder ${decoderInfo.name}")
+        return tryCreateConfiguredDecoder(decoderInfo, codec, surface, width, height, fps, tuned = true)
+            ?: tryCreateConfiguredDecoder(decoderInfo, codec, surface, width, height, fps, tuned = false)
+            ?: throw IllegalStateException(
+                "Unable to configure hardware ${codec.displayName} decoder ${decoderInfo.name}"
+            )
     }
 
     private fun tryCreateConfiguredDecoder(
         decoderInfo: MediaCodecInfo,
+        codec: VideoCodec,
         surface: Surface,
         width: Int,
         height: Int,
+        fps: Int,
         tuned: Boolean,
     ): MediaCodec? {
-        var codec: MediaCodec? = null
+        var mediaCodec: MediaCodec? = null
         return try {
-            codec = MediaCodec.createByCodecName(decoderInfo.name)
-            codec.configure(createDecoderFormat(width, height, tuned), surface, null, 0)
-            codec
+            mediaCodec = MediaCodec.createByCodecName(decoderInfo.name)
+            mediaCodec.configure(
+                createDecoderFormat(
+                    codec = codec,
+                    width = width,
+                    height = height,
+                    fps = fps,
+                    tuned = tuned
+                ),
+                surface,
+                null,
+                0
+            )
+            mediaCodec
         } catch (e: Exception) {
             try {
-                codec?.release()
+                mediaCodec?.release()
             } catch (_: Exception) {
             }
             if (tuned) {
@@ -382,11 +474,17 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun createDecoderFormat(width: Int, height: Int, tuned: Boolean): MediaFormat {
-        return MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+    private fun createDecoderFormat(
+        codec: VideoCodec,
+        width: Int,
+        height: Int,
+        fps: Int,
+        tuned: Boolean,
+    ): MediaFormat {
+        return MediaFormat.createVideoFormat(codec.mimeType, width, height).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setInteger(MediaFormat.KEY_LATENCY, 0)
@@ -446,9 +544,14 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
-    private fun MediaCodecInfo.supportsAvcSize(width: Int, height: Int, fps: Int): Boolean {
+    private fun MediaCodecInfo.supportsVideoSize(
+        mimeType: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+    ): Boolean {
         return try {
-            val videoCapabilities = getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+            val videoCapabilities = getCapabilitiesForType(mimeType).videoCapabilities
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 videoCapabilities.areSizeAndRateSupported(width, height, fps.toDouble()) ||
                     videoCapabilities.isSizeSupported(width, height)
@@ -513,6 +616,9 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private fun onTouch(view: View, event: MotionEvent): Boolean {
+        if (!remoteTouchEnabled) {
+            return true
+        }
         val pointerIndex = event.actionIndex
         val x = (event.getX(pointerIndex) / view.width).coerceIn(0f, 1f)
         val y = (event.getY(pointerIndex) / view.height).coerceIn(0f, 1f)
@@ -585,14 +691,27 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun loadSettings() {
         val multiplier = preferences.getInt(KEY_RESOLUTION_MULTIPLIER, ResolutionMultiplier.X2.multiplier)
         selectedResolution = ResolutionMultiplier.fromMultiplier(multiplier)
-        val aspect = preferences.getString(KEY_ASPECT_MODE, AspectMode.FourThree.protocolValue)
+        val aspect = preferences.getString(KEY_ASPECT_MODE, AspectMode.Native.protocolValue)
         selectedAspectMode = AspectMode.fromProtocolValue(aspect)
+        val screen = preferences.getString(KEY_STREAM_SCREEN, StreamScreen.Touch.protocolValue)
+        selectedScreen = StreamScreen.fromProtocolValue(screen)
+        remoteTouchEnabled = selectedScreen.touchEnabled
+        val codec = preferences.getString(KEY_VIDEO_CODEC, VideoCodec.Avc.protocolValue)
+        selectedCodec = VideoCodec.fromProtocolValue(codec)
+        val frameRate = preferences.getInt(KEY_FRAME_RATE, FrameRate.Fps60.fps)
+        selectedFrameRate = FrameRate.fromFps(frameRate)
+        val bitrate = preferences.getString(KEY_VIDEO_BITRATE, VideoBitrate.Auto.protocolValue)
+        selectedBitrate = VideoBitrate.fromProtocolValue(bitrate)
     }
 
     private fun saveSettings() {
         preferences.edit()
             .putInt(KEY_RESOLUTION_MULTIPLIER, selectedResolution.multiplier)
             .putString(KEY_ASPECT_MODE, selectedAspectMode.protocolValue)
+            .putString(KEY_STREAM_SCREEN, selectedScreen.protocolValue)
+            .putString(KEY_VIDEO_CODEC, selectedCodec.protocolValue)
+            .putInt(KEY_FRAME_RATE, selectedFrameRate.fps)
+            .putString(KEY_VIDEO_BITRATE, selectedBitrate.protocolValue)
             .apply()
     }
 
@@ -686,19 +805,86 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
     }
 
+    private enum class StreamScreen(
+        val protocolValue: String,
+        val labelResId: Int,
+        val touchEnabled: Boolean,
+        val nativeAspectRatio: Float,
+    ) {
+        Touch("bottom", R.string.stream_screen_touch, true, 4f / 3f),
+        Main("top", R.string.stream_screen_main, false, 5f / 3f);
+
+        companion object {
+            fun fromProtocolValue(value: String?): StreamScreen {
+                return when (value?.lowercase(Locale.US)) {
+                    "top", "main", "primary", "upper" -> Main
+                    else -> Touch
+                }
+            }
+        }
+    }
+
+    private enum class VideoCodec(
+        val protocolValue: String,
+        val mimeType: String,
+        val displayName: String,
+        val labelResId: Int,
+    ) {
+        Avc("avc", MediaFormat.MIMETYPE_VIDEO_AVC, "AVC", R.string.video_codec_avc),
+        Hevc("hevc", MediaFormat.MIMETYPE_VIDEO_HEVC, "HEVC", R.string.video_codec_hevc);
+
+        companion object {
+            fun fromProtocolValue(value: String?): VideoCodec {
+                return when (value?.lowercase(Locale.US)) {
+                    "hevc", "h265", "h.265" -> Hevc
+                    else -> Avc
+                }
+            }
+        }
+    }
+
+    private enum class FrameRate(val fps: Int, val labelResId: Int) {
+        Fps30(30, R.string.frame_rate_30),
+        Fps60(60, R.string.frame_rate_60);
+
+        companion object {
+            fun fromFps(fps: Int): FrameRate {
+                return entries.firstOrNull { it.fps == fps } ?: Fps60
+            }
+        }
+    }
+
+    private enum class VideoBitrate(val protocolValue: String, val labelResId: Int) {
+        Auto("auto", R.string.video_bitrate_auto),
+        Mbps2("2000000", R.string.video_bitrate_2),
+        Mbps4("4000000", R.string.video_bitrate_4),
+        Mbps8("8000000", R.string.video_bitrate_8),
+        Mbps12("12000000", R.string.video_bitrate_12),
+        Mbps20("20000000", R.string.video_bitrate_20);
+
+        companion object {
+            fun fromProtocolValue(value: String?): VideoBitrate {
+                return entries.firstOrNull { it.protocolValue == value } ?: Auto
+            }
+        }
+    }
+
     private enum class AspectMode(
         val protocolValue: String,
-        val label: String,
+        val labelResId: Int,
         val displayAspectRatio: Float?,
     ) {
-        FourThree("4:3", "4:3", 4f / 3f),
-        SixteenNine("16:9", "16:9", 16f / 9f),
-        Fill("fill", "Fill", null);
+        Native("native", R.string.aspect_mode_native, 4f / 3f),
+        SixteenNine("16:9", R.string.aspect_mode_16_9, 16f / 9f),
+        Fill("fill", R.string.aspect_mode_fill, null);
 
         companion object {
             fun fromProtocolValue(value: String?): AspectMode {
-                return entries.firstOrNull { it.protocolValue.equals(value, ignoreCase = true) }
-                    ?: FourThree
+                return when (value?.lowercase(Locale.US)) {
+                    "4:3", "4_3" -> Native
+                    else -> entries.firstOrNull { it.protocolValue.equals(value, ignoreCase = true) }
+                        ?: Native
+                }
             }
         }
     }
@@ -708,7 +894,10 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
         private const val PREFERENCES_NAME = "azahar_second_screen"
         private const val KEY_RESOLUTION_MULTIPLIER = "resolution_multiplier"
         private const val KEY_ASPECT_MODE = "aspect_mode"
-        private const val CAST_FPS = 60
+        private const val KEY_STREAM_SCREEN = "stream_screen"
+        private const val KEY_VIDEO_CODEC = "video_codec"
+        private const val KEY_FRAME_RATE = "frame_rate"
+        private const val KEY_VIDEO_BITRATE = "video_bitrate"
         private const val MAX_PENDING_FRAMES = 8
         private const val DECODER_INPUT_TIMEOUT_US = 1_000L
         private const val VIDEO_SOCKET_BUFFER_BYTES = 256 * 1024
@@ -718,14 +907,24 @@ class MainActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     private class AspectSurfaceView(context: android.content.Context) : SurfaceView(context) {
-        var aspectMode: AspectMode = AspectMode.FourThree
+        var nativeAspectRatio: Float = 4f / 3f
+            set(value) {
+                field = value
+                requestLayout()
+            }
+
+        var aspectMode: AspectMode = AspectMode.Native
             set(value) {
                 field = value
                 requestLayout()
             }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val targetAspectRatio = aspectMode.displayAspectRatio
+            val targetAspectRatio = if (aspectMode == AspectMode.Native) {
+                nativeAspectRatio
+            } else {
+                aspectMode.displayAspectRatio
+            }
             if (targetAspectRatio == null) {
                 super.onMeasure(widthMeasureSpec, heightMeasureSpec)
                 return

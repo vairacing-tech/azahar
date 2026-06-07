@@ -45,9 +45,11 @@ import org.citra.citra_emu.R
 import org.citra.citra_emu.activities.EmulationActivity
 import org.citra.citra_emu.display.ScreenLayout
 import org.citra.citra_emu.display.SecondaryDisplayLayout
+import org.citra.citra_emu.features.settings.model.BooleanSetting
 import org.citra.citra_emu.features.settings.model.IntSetting
 import org.citra.citra_emu.features.settings.model.Settings
 import org.citra.citra_emu.features.settings.utils.SettingsFile
+import org.citra.citra_emu.utils.EmulationMenuSettings
 import org.citra.citra_emu.utils.Log
 
 class DualDeviceCastHost(
@@ -80,6 +82,9 @@ class DualDeviceCastHost(
 
     private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
     private val previousSecondaryLayout = IntSetting.SECONDARY_DISPLAY_LAYOUT.int
+    private val previousAspectRatio = IntSetting.ASPECT_RATIO.int
+    private val previousSwapScreen = BooleanSetting.SWAP_SCREEN.boolean
+    private val previousMenuSwapScreen = EmulationMenuSettings.swapScreens
 
     val isRunning: Boolean
         get() = running.get()
@@ -94,7 +99,7 @@ class DualDeviceCastHost(
             videoSocket = DatagramSocket().apply {
                 sendBufferSize = VIDEO_SOCKET_BUFFER_BYTES
             }
-            applyCastLayout()
+            applyCastLayout(castConfig)
             executor.execute(::acceptControlClient)
         } catch (e: Exception) {
             close()
@@ -175,27 +180,42 @@ class DualDeviceCastHost(
             .appendQueryParameter("control", controlPort.toString())
             .appendQueryParameter("video", videoPort.toString())
             .appendQueryParameter("token", token)
-            .appendQueryParameter("screen", "bottom")
             .build()
             .toString()
     }
 
-    private fun applyCastLayout() {
+    private fun applyCastLayout(config: CastConfig) {
         IntSetting.SCREEN_LAYOUT.int = ScreenLayout.SINGLE_SCREEN.int
-        IntSetting.SECONDARY_DISPLAY_LAYOUT.int = SecondaryDisplayLayout.BOTTOM_SCREEN.int
+        BooleanSetting.SWAP_SCREEN.boolean = config.streamScreen.swapScreens
+        EmulationMenuSettings.swapScreens = config.streamScreen.swapScreens
+        IntSetting.SECONDARY_DISPLAY_LAYOUT.int = config.streamScreen.secondaryDisplayLayout.int
+        IntSetting.ASPECT_RATIO.int = if (config.streamScreen.usesAspectRatioSetting) {
+            config.aspectMode.aspectRatioSetting
+        } else {
+            previousAspectRatio
+        }
         settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(BooleanSetting.SWAP_SCREEN, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.ASPECT_RATIO, SettingsFile.FILE_NAME_CONFIG)
         NativeLibrary.reloadSettings()
+        NativeLibrary.swapScreens(config.streamScreen.swapScreens, activity.windowManager.defaultDisplay.rotation)
         NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
         releaseSecondaryDisplay()
     }
 
     private fun restoreLayout() {
         IntSetting.SCREEN_LAYOUT.int = previousScreenLayout
+        BooleanSetting.SWAP_SCREEN.boolean = previousSwapScreen
+        EmulationMenuSettings.swapScreens = previousMenuSwapScreen
         IntSetting.SECONDARY_DISPLAY_LAYOUT.int = previousSecondaryLayout
+        IntSetting.ASPECT_RATIO.int = previousAspectRatio
         settings.saveSetting(IntSetting.SCREEN_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(BooleanSetting.SWAP_SCREEN, SettingsFile.FILE_NAME_CONFIG)
         settings.saveSetting(IntSetting.SECONDARY_DISPLAY_LAYOUT, SettingsFile.FILE_NAME_CONFIG)
+        settings.saveSetting(IntSetting.ASPECT_RATIO, SettingsFile.FILE_NAME_CONFIG)
         NativeLibrary.reloadSettings()
+        NativeLibrary.swapScreens(previousSwapScreen, activity.windowManager.defaultDisplay.rotation)
         NativeLibrary.updateFramebuffer(NativeLibrary.isPortraitMode)
     }
 
@@ -213,9 +233,23 @@ class DualDeviceCastHost(
 
             receiverAddress = socket.inetAddress
             receiverVideoPort = parts[2].toInt()
-            castConfig = CastConfig.fromReceiverRequest(parts.getOrNull(3), parts.getOrNull(4))
+            castConfig = CastConfig.fromReceiverRequest(
+                multiplierValue = parts.getOrNull(3),
+                aspectValue = parts.getOrNull(4),
+                codecValue = parts.getOrNull(5),
+                fpsValue = parts.getOrNull(6),
+                bitrateValue = parts.getOrNull(7),
+                screenValue = parts.getOrNull(8)
+            )
+            applyCastLayout(castConfig)
             socket.getOutputStream()
-                .write("OK ${castConfig.width} ${castConfig.height} $CAST_FPS ${castConfig.aspectMode.protocolValue}\n".toByteArray())
+                .write(
+                    (
+                        "OK ${castConfig.width} ${castConfig.height} ${castConfig.fps} " +
+                            "${castConfig.aspectMode.protocolValue} ${castConfig.codec.protocolValue} " +
+                            "${castConfig.streamScreen.protocolValue} ${castConfig.streamScreen.touchEnabled}\n"
+                        ).toByteArray()
+                )
             activity.runOnUiThread {
                 Toast.makeText(activity, R.string.dual_device_cast_connected, Toast.LENGTH_SHORT).show()
             }
@@ -263,6 +297,9 @@ class DualDeviceCastHost(
     }
 
     private fun handleTouch(parts: List<String>) {
+        if (!castConfig.streamScreen.touchEnabled) {
+            return
+        }
         if (parts.size < 4) return
         val action = parts[1]
         val x = (parts[2].toFloatOrNull() ?: return).coerceIn(0f, 1f) * castConfig.width
@@ -275,7 +312,7 @@ class DualDeviceCastHost(
     }
 
     private fun startEncoder(config: CastConfig) {
-        val encoderInfo = selectHardwareAvcEncoder(config)
+        val encoderInfo = selectHardwareEncoder(config)
         val codec = createConfiguredEncoder(encoderInfo, config)
         encoderSurface = codec.createInputSurface()
         encoder = codec
@@ -305,15 +342,15 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun selectHardwareAvcEncoder(config: CastConfig): MediaCodecInfo {
+    private fun selectHardwareEncoder(config: CastConfig): MediaCodecInfo {
         val candidates = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
             .filter {
                 it.isEncoder &&
-                    it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                    it.supportedTypes.any { type -> type.equals(config.codec.mimeType, true) } &&
                     it.isHardwareCodec() &&
                     !it.isSecureOrTunneledCodec() &&
-                    it.supportsSurfaceInput() &&
-                    it.supportsAvcSize(config.width, config.height, CAST_FPS)
+                    it.supportsSurfaceInput(config.codec.mimeType) &&
+                    it.supportsVideoSize(config.codec.mimeType, config.width, config.height, config.fps)
             }
             .sortedWith(
                 compareByDescending<MediaCodecInfo> { it.preferenceScore() }
@@ -321,11 +358,12 @@ class DualDeviceCastHost(
             )
 
         val encoderInfo = candidates.firstOrNull()
-            ?: throw IllegalStateException("No hardware AVC encoder with Surface input")
+            ?: throw IllegalStateException("No hardware ${config.codec.displayName} encoder with Surface input")
         val vendor = if (encoderInfo.isQualcommCodec()) "Qualcomm" else "hardware"
         Log.info(
-            "[DualDeviceCastHost] Using $vendor encoder ${encoderInfo.name} " +
-                "${config.width}x${config.height}@$CAST_FPS ${config.bitrate}bps"
+            "[DualDeviceCastHost] Using $vendor ${config.codec.displayName} encoder ${encoderInfo.name} " +
+                "${config.streamScreen.protocolValue} ${config.width}x${config.height}@${config.fps} " +
+                "${config.bitrate}bps"
         )
         return encoderInfo
     }
@@ -336,7 +374,9 @@ class DualDeviceCastHost(
     ): MediaCodec {
         return tryCreateConfiguredEncoder(encoderInfo, config, tuned = true)
             ?: tryCreateConfiguredEncoder(encoderInfo, config, tuned = false)
-            ?: throw IllegalStateException("Unable to configure hardware AVC encoder ${encoderInfo.name}")
+            ?: throw IllegalStateException(
+                "Unable to configure hardware ${config.codec.displayName} encoder ${encoderInfo.name}"
+            )
     }
 
     private fun tryCreateConfiguredEncoder(
@@ -372,17 +412,17 @@ class DualDeviceCastHost(
         tuned: Boolean,
     ): MediaFormat {
         return MediaFormat.createVideoFormat(
-            MediaFormat.MIMETYPE_VIDEO_AVC,
+            config.codec.mimeType,
             config.width,
             config.height
         ).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, CAST_FPS)
+            setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, CAST_GOP_SECONDS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, CAST_FPS)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 setInteger(MediaFormat.KEY_LATENCY, 0)
@@ -394,13 +434,13 @@ class DualDeviceCastHost(
                 setInteger(MediaFormat.KEY_VIDEO_QP_P_MAX, CAST_QP_P_MAX)
             }
             if (tuned) {
-                applyEncoderTuning(encoderInfo)
+                applyEncoderTuning(encoderInfo, config.codec)
             }
         }
     }
 
-    private fun MediaFormat.applyEncoderTuning(encoderInfo: MediaCodecInfo) {
-        val capabilities = encoderInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+    private fun MediaFormat.applyEncoderTuning(encoderInfo: MediaCodecInfo, codec: CastCodec) {
+        val capabilities = encoderInfo.getCapabilitiesForType(codec.mimeType)
         val encoderCapabilities = capabilities.encoderCapabilities
         if (encoderCapabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)) {
             setInteger(
@@ -408,14 +448,29 @@ class DualDeviceCastHost(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
             )
         }
-        when {
-            encoderInfo.supportsAvcProfile(MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline) ->
-                setInteger(
+        when (codec) {
+            CastCodec.Avc -> when {
+                encoderInfo.supportsProfile(
+                    codec.mimeType,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline
+                ) -> setInteger(
                     MediaFormat.KEY_PROFILE,
                     MediaCodecInfo.CodecProfileLevel.AVCProfileConstrainedBaseline
                 )
-            encoderInfo.supportsAvcProfile(MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) ->
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+                encoderInfo.supportsProfile(
+                    codec.mimeType,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                ) -> setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
+            }
+            CastCodec.Hevc -> {
+                if (encoderInfo.supportsProfile(
+                        codec.mimeType,
+                        MediaCodecInfo.CodecProfileLevel.HEVCProfileMain
+                    )
+                ) {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+                }
+            }
         }
         setInteger("low-latency", 1)
         setInteger("vendor.qti-ext-enc-low-latency.enable", 1)
@@ -469,9 +524,9 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun MediaCodecInfo.supportsSurfaceInput(): Boolean {
+    private fun MediaCodecInfo.supportsSurfaceInput(mimeType: String): Boolean {
         return try {
-            getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            getCapabilitiesForType(mimeType)
                 .colorFormats
                 .contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         } catch (_: Exception) {
@@ -479,9 +534,14 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun MediaCodecInfo.supportsAvcSize(width: Int, height: Int, fps: Int): Boolean {
+    private fun MediaCodecInfo.supportsVideoSize(
+        mimeType: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+    ): Boolean {
         return try {
-            val videoCapabilities = getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+            val videoCapabilities = getCapabilitiesForType(mimeType).videoCapabilities
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 videoCapabilities.areSizeAndRateSupported(width, height, fps.toDouble()) ||
                     videoCapabilities.isSizeSupported(width, height)
@@ -493,9 +553,9 @@ class DualDeviceCastHost(
         }
     }
 
-    private fun MediaCodecInfo.supportsAvcProfile(profile: Int): Boolean {
+    private fun MediaCodecInfo.supportsProfile(mimeType: String, profile: Int): Boolean {
         return try {
-            getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            getCapabilitiesForType(mimeType)
                 .profileLevels
                 .any { it.profile == profile }
         } catch (_: Exception) {
@@ -689,17 +749,76 @@ class DualDeviceCastHost(
         }
     }
 
-    private enum class ReceiverAspectMode(val protocolValue: String) {
-        FourThree("4:3"),
-        SixteenNine("16:9"),
-        Fill("fill");
+    private enum class CastCodec(
+        val protocolValue: String,
+        val mimeType: String,
+        val displayName: String,
+    ) {
+        Avc("avc", MediaFormat.MIMETYPE_VIDEO_AVC, "AVC"),
+        Hevc("hevc", MediaFormat.MIMETYPE_VIDEO_HEVC, "HEVC");
+
+        companion object {
+            fun fromProtocolValue(value: String?): CastCodec {
+                return when (value?.lowercase(Locale.US)) {
+                    "hevc", "h265", "h.265" -> Hevc
+                    else -> Avc
+                }
+            }
+        }
+    }
+
+    private enum class StreamScreen(
+        val protocolValue: String,
+        val baseWidth: Int,
+        val baseHeight: Int,
+        val secondaryDisplayLayout: SecondaryDisplayLayout,
+        val swapScreens: Boolean,
+        val touchEnabled: Boolean,
+        val usesAspectRatioSetting: Boolean,
+    ) {
+        Bottom(
+            "bottom",
+            BASE_TOUCH_WIDTH,
+            BASE_SCREEN_HEIGHT,
+            SecondaryDisplayLayout.BOTTOM_SCREEN,
+            false,
+            true,
+            false
+        ),
+        Top(
+            "top",
+            BASE_TOP_SCREEN_WIDTH,
+            BASE_SCREEN_HEIGHT,
+            SecondaryDisplayLayout.TOP_SCREEN,
+            true,
+            false,
+            true
+        );
+
+        companion object {
+            fun fromProtocolValue(value: String?): StreamScreen {
+                return when (value?.lowercase(Locale.US)) {
+                    "top", "main", "primary", "upper" -> Top
+                    else -> Bottom
+                }
+            }
+        }
+    }
+
+    private enum class ReceiverAspectMode(
+        val protocolValue: String,
+        val aspectRatioSetting: Int,
+    ) {
+        Native("native", ASPECT_RATIO_DEFAULT),
+        SixteenNine("16:9", ASPECT_RATIO_16_9),
+        Fill("fill", ASPECT_RATIO_STRETCH);
 
         companion object {
             fun fromProtocolValue(value: String?): ReceiverAspectMode {
                 return when (value?.lowercase(Locale.US)) {
                     "16:9", "16:0", "16_9", "widescreen" -> SixteenNine
                     "fill", "full" -> Fill
-                    else -> FourThree
+                    else -> Native
                 }
             }
         }
@@ -709,30 +828,62 @@ class DualDeviceCastHost(
         val width: Int,
         val height: Int,
         val aspectMode: ReceiverAspectMode,
+        val codec: CastCodec,
+        val fps: Int,
+        val requestedBitrateBps: Int?,
+        val streamScreen: StreamScreen,
     ) {
         val bitrate: Int
             get() {
-                val basePixels = BASE_TOUCH_WIDTH * BASE_TOUCH_HEIGHT * DEFAULT_MULTIPLIER * DEFAULT_MULTIPLIER
+                requestedBitrateBps?.let {
+                    return it.coerceIn(MIN_BITRATE, MAX_BITRATE)
+                }
+                val basePixels =
+                    streamScreen.baseWidth * streamScreen.baseHeight *
+                        DEFAULT_MULTIPLIER * DEFAULT_MULTIPLIER
                 val scaledBitrate = BASE_BITRATE.toLong() * width * height / basePixels
                 return scaledBitrate.coerceIn(MIN_BITRATE.toLong(), MAX_BITRATE.toLong()).toInt()
             }
 
         companion object {
             fun default(): CastConfig {
-                return fromReceiverRequest(DEFAULT_MULTIPLIER.toString(), ReceiverAspectMode.FourThree.protocolValue)
+                return fromReceiverRequest(
+                    multiplierValue = DEFAULT_MULTIPLIER.toString(),
+                    aspectValue = ReceiverAspectMode.Native.protocolValue,
+                    codecValue = CastCodec.Avc.protocolValue,
+                    fpsValue = DEFAULT_FPS.toString(),
+                    bitrateValue = null,
+                    screenValue = StreamScreen.Bottom.protocolValue
+                )
             }
 
-            fun fromReceiverRequest(multiplierValue: String?, aspectValue: String?): CastConfig {
+            fun fromReceiverRequest(
+                multiplierValue: String?,
+                aspectValue: String?,
+                codecValue: String?,
+                fpsValue: String?,
+                bitrateValue: String?,
+                screenValue: String?,
+            ): CastConfig {
                 val multiplier = (multiplierValue?.toIntOrNull() ?: DEFAULT_MULTIPLIER)
                     .coerceIn(MIN_MULTIPLIER, MAX_MULTIPLIER)
                 val aspectMode = ReceiverAspectMode.fromProtocolValue(aspectValue)
-                val height = BASE_TOUCH_HEIGHT * multiplier
+                val codec = CastCodec.fromProtocolValue(codecValue)
+                val fps = when (fpsValue?.toIntOrNull()) {
+                    30 -> 30
+                    else -> DEFAULT_FPS
+                }
+                val requestedBitrate = bitrateValue
+                    ?.takeUnless { it.equals("auto", ignoreCase = true) }
+                    ?.toIntOrNull()
+                val streamScreen = StreamScreen.fromProtocolValue(screenValue)
+                val height = streamScreen.baseHeight * multiplier
                 val width = when (aspectMode) {
                     ReceiverAspectMode.SixteenNine -> alignEven((height * 16 + 4) / 9)
-                    ReceiverAspectMode.FourThree,
-                    ReceiverAspectMode.Fill -> BASE_TOUCH_WIDTH * multiplier
+                    ReceiverAspectMode.Native,
+                    ReceiverAspectMode.Fill -> streamScreen.baseWidth * multiplier
                 }
-                return CastConfig(width, height, aspectMode)
+                return CastConfig(width, height, aspectMode, codec, fps, requestedBitrate, streamScreen)
             }
 
             private fun alignEven(value: Int): Int {
@@ -743,17 +894,21 @@ class DualDeviceCastHost(
 
     companion object {
         private const val BASE_TOUCH_WIDTH = 320
-        private const val BASE_TOUCH_HEIGHT = 240
+        private const val BASE_TOP_SCREEN_WIDTH = 400
+        private const val BASE_SCREEN_HEIGHT = 240
         private const val DEFAULT_MULTIPLIER = 2
         private const val MIN_MULTIPLIER = 1
         private const val MAX_MULTIPLIER = 4
-        private const val CAST_FPS = 60
+        private const val DEFAULT_FPS = 60
         private const val CAST_GOP_SECONDS = 1
         private const val CAST_MAX_B_FRAMES = 0
         private const val CAST_QP_P_MAX = 34
         private const val BASE_BITRATE = 4_000_000
-        private const val MIN_BITRATE = 1_500_000
-        private const val MAX_BITRATE = 12_000_000
+        private const val MIN_BITRATE = 750_000
+        private const val MAX_BITRATE = 30_000_000
+        private const val ASPECT_RATIO_DEFAULT = 0
+        private const val ASPECT_RATIO_16_9 = 1
+        private const val ASPECT_RATIO_STRETCH = 5
         private const val VIDEO_SOCKET_BUFFER_BYTES = 256 * 1024
         private const val MAGIC = 0x415A3244 // AZ2D
         private const val HEADER_SIZE = 21
