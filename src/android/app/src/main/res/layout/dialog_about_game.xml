@@ -221,14 +221,14 @@
                 app:icon="@drawable/ic_splitscreen" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/about_game_play_tv"
+                android:id="@+id/about_game_play_moonlight"
                 style="@style/Widget.Material3.Button.TonalButton.Icon"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:contentDescription="@string/tv_main_screen_cast_play_on_tv"
-                android:text="@string/tv_main_screen_cast_play_on_tv"
+                android:contentDescription="@string/moonlight_cast_play_with_moonlight"
+                android:text="@string/moonlight_cast_play_with_moonlight"
                 app:icon="@drawable/ic_website" />
 
         </LinearLayout>

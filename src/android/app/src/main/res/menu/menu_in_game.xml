@@ -48,9 +48,9 @@
         android:title="@string/dual_device_cast" />
 
     <item
-        android:id="@+id/menu_tv_main_screen_cast"
+        android:id="@+id/menu_moonlight_cast"
         android:icon="@drawable/ic_website"
-        android:title="@string/tv_main_screen_cast" />
+        android:title="@string/moonlight_cast" />
 
     <item
         android:id="@+id/menu_lock_drawer"

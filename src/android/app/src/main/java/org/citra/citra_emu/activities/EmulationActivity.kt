@@ -36,7 +36,6 @@ import org.citra.citra_emu.camera.StillImageCameraHelper.OnFilePickerResult
 import org.citra.citra_emu.contracts.OpenFileResultContract
 import org.citra.citra_emu.databinding.ActivityEmulationBinding
 import org.citra.citra_emu.dualdevice.DualDeviceCastHost
-import org.citra.citra_emu.dualdevice.TvMainScreenCastHost
 import org.citra.citra_emu.display.ScreenAdjustmentUtil
 import org.citra.citra_emu.display.SecondaryDisplay
 import org.citra.citra_emu.features.hotkeys.HotkeyUtility
@@ -47,6 +46,7 @@ import org.citra.citra_emu.features.settings.model.view.InputBindingSetting
 import org.citra.citra_emu.fragments.EmulationFragment
 import org.citra.citra_emu.fragments.MessageDialogFragment
 import org.citra.citra_emu.model.Game
+import org.citra.citra_emu.moonlight.MoonlightCastHost
 import org.citra.citra_emu.utils.BuildUtil
 import org.citra.citra_emu.utils.ControllerMappingHelper
 import org.citra.citra_emu.utils.FileBrowserHelper
@@ -69,7 +69,7 @@ class EmulationActivity : AppCompatActivity() {
     private lateinit var hotkeyUtility: HotkeyUtility
     private lateinit var secondaryDisplay: SecondaryDisplay
     private var dualDeviceCastHost: DualDeviceCastHost? = null
-    private var tvMainScreenCastHost: TvMainScreenCastHost? = null
+    private var moonlightCastHost: MoonlightCastHost? = null
 
     private val onShutdown = Runnable {
         if (intent.getBooleanExtra("launched_from_shortcut", false)) {
@@ -135,8 +135,8 @@ class EmulationActivity : AppCompatActivity() {
         when {
             intent.getBooleanExtra(EXTRA_DUAL_DEVICE_CAST_ON_START, false) ->
                 prepareDualDeviceCastBeforeGame(game, navController)
-            intent.getBooleanExtra(EXTRA_TV_MAIN_SCREEN_CAST_ON_START, false) ->
-                prepareTvMainScreenCastBeforeGame(game, navController)
+            intent.getBooleanExtra(EXTRA_MOONLIGHT_CAST_ON_START, false) ->
+                prepareMoonlightCastBeforeGame(game, navController)
             else -> startEmulationGraph(game, navController)
         }
     }
@@ -194,15 +194,15 @@ class EmulationActivity : AppCompatActivity() {
         }
     }
 
-    private fun prepareTvMainScreenCastBeforeGame(
+    private fun prepareMoonlightCastBeforeGame(
         game: Game,
         navController: NavController,
     ) {
         try {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
-            val host = createTvMainScreenCastHost(protectNativeSurface = isVulkanRendererSelected())
+            val host = createMoonlightCastHost(protectNativeSurface = isVulkanRendererSelected())
             host.start()
-            tvMainScreenCastHost = host
+            moonlightCastHost = host
             host.showPairingDialog(
                 onStartGame = {
                     startEmulationGraph(game, navController)
@@ -215,7 +215,7 @@ class EmulationActivity : AppCompatActivity() {
             applyOrientationSettings()
             Toast.makeText(
                 this,
-                getString(R.string.tv_main_screen_cast_error, e.message ?: "unknown"),
+                getString(R.string.moonlight_cast_error, e.message ?: "unknown"),
                 Toast.LENGTH_LONG
             ).show()
             startEmulationGraph(game, navController)
@@ -303,8 +303,8 @@ class EmulationActivity : AppCompatActivity() {
         NativeLibrary.playTimeManagerStop()
         dualDeviceCastHost?.close()
         dualDeviceCastHost = null
-        tvMainScreenCastHost?.close()
-        tvMainScreenCastHost = null
+        moonlightCastHost?.close()
+        moonlightCastHost = null
         isEmulationRunning = false
         instance = null
         secondaryDisplay.releasePresentation()
@@ -355,7 +355,7 @@ class EmulationActivity : AppCompatActivity() {
         emulationViewModel.setEmulationStarted(true)
         isEmulationReady = true
         dualDeviceCastHost?.onEmulationStarted()
-        tvMainScreenCastHost?.onEmulationStarted()
+        moonlightCastHost?.onEmulationStarted()
         if (isRotationBlocked) {
             isRotationBlocked = false
             applyOrientationSettings()
@@ -375,8 +375,8 @@ class EmulationActivity : AppCompatActivity() {
             }
             return
         }
-        tvMainScreenCastHost?.close()
-        tvMainScreenCastHost = null
+        moonlightCastHost?.close()
+        moonlightCastHost = null
 
         if (isVulkanRendererSelected()) {
             Toast.makeText(
@@ -405,11 +405,11 @@ class EmulationActivity : AppCompatActivity() {
 
     fun isDualDeviceCastRunning(): Boolean = dualDeviceCastHost?.isRunning == true
 
-    fun toggleTvMainScreenCast() {
-        val currentHost = tvMainScreenCastHost
+    fun toggleMoonlightCast() {
+        val currentHost = moonlightCastHost
         if (currentHost?.isRunning == true) {
             if (currentHost.requestStop()) {
-                tvMainScreenCastHost = null
+                moonlightCastHost = null
             }
             return
         }
@@ -419,7 +419,7 @@ class EmulationActivity : AppCompatActivity() {
         if (isVulkanRendererSelected()) {
             Toast.makeText(
                 this,
-                R.string.tv_main_screen_cast_vulkan_start_before_game,
+                R.string.moonlight_cast_vulkan_start_before_game,
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -427,24 +427,24 @@ class EmulationActivity : AppCompatActivity() {
 
         try {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
-            val host = createTvMainScreenCastHost(protectNativeSurface = false)
+            val host = createMoonlightCastHost(protectNativeSurface = false)
             host.start()
-            tvMainScreenCastHost = host
+            moonlightCastHost = host
             host.showPairingDialog()
         } catch (e: Exception) {
             applyOrientationSettings()
             Toast.makeText(
                 this,
-                getString(R.string.tv_main_screen_cast_error, e.message ?: "unknown"),
+                getString(R.string.moonlight_cast_error, e.message ?: "unknown"),
                 Toast.LENGTH_LONG
             ).show()
         }
     }
 
-    fun isTvMainScreenCastRunning(): Boolean = tvMainScreenCastHost?.isRunning == true
+    fun isMoonlightCastRunning(): Boolean = moonlightCastHost?.isRunning == true
 
     private fun isSecondaryCastRunning(): Boolean =
-        dualDeviceCastHost?.isRunning == true || tvMainScreenCastHost?.isRunning == true
+        dualDeviceCastHost?.isRunning == true || moonlightCastHost?.isRunning == true
 
     private fun createDualDeviceCastHost(protectNativeSurface: Boolean): DualDeviceCastHost =
         DualDeviceCastHost(
@@ -460,8 +460,8 @@ class EmulationActivity : AppCompatActivity() {
             }
         )
 
-    private fun createTvMainScreenCastHost(protectNativeSurface: Boolean): TvMainScreenCastHost =
-        TvMainScreenCastHost(
+    private fun createMoonlightCastHost(protectNativeSurface: Boolean): MoonlightCastHost =
+        MoonlightCastHost(
             activity = this,
             settings = settingsViewModel.settings,
             releaseSecondaryDisplay = { secondaryDisplay.suspendPresentation() },
@@ -796,7 +796,7 @@ class EmulationActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_DUAL_DEVICE_CAST_ON_START = "dual_device_cast_on_start"
-        const val EXTRA_TV_MAIN_SCREEN_CAST_ON_START = "tv_main_screen_cast_on_start"
+        const val EXTRA_MOONLIGHT_CAST_ON_START = "moonlight_cast_on_start"
         private const val GRAPHICS_API_VULKAN = 2
         private var instance: EmulationActivity? = null
 

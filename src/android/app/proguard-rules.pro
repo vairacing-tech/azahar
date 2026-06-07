@@ -10,11 +10,6 @@
 -keep class org.ini4j.spi.IniBuilder
 -keep class org.ini4j.spi.IniFormatter
 
-# WebRTC resolves several Java classes and annotated members directly from
-# libjingle_peerconnection_so during JNI_OnLoad and call setup.
--keep class org.jni_zero.** { *; }
--keep class org.webrtc.** { *; }
-
 # Suppress warnings for R8
 -dontwarn org.bouncycastle.jsse.BCSSLParameters
 -dontwarn org.bouncycastle.jsse.BCSSLSocket

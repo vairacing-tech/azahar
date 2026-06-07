@@ -34,7 +34,7 @@ val downloadedJniLibsPath = "${layout.buildDirectory.get().asFile.path}/download
 android {
     namespace = "org.citra.citra_emu"
 
-    compileSdkVersion = "android-35"
+    compileSdk = 35
     ndkVersion = "27.3.13750724"
 
     compileOptions {
@@ -87,6 +87,7 @@ android {
                     "-DANDROID_ARM_NEON=true", // cryptopp requires Neon to work
                     "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON", // Support Android 15 16KiB page sizes
                     "-DENABLE_GDBSTUB=OFF", // Disable GDB stub
+                    "-DENABLE_TESTS=OFF", // Do not build native test binaries for Android APKs
                 )
             }
         }
@@ -218,7 +219,8 @@ dependencies {
     implementation("org.ini4j:ini4j:0.5.4")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.2")
     implementation("com.google.zxing:core:3.5.3")
-    implementation("io.github.webrtc-sdk:android:144.7559.05")
+    implementation("io.github.jaredmdobson:concentus:1.0.2")
+    testImplementation("junit:junit:4.13.2")
 }
 
 // Download Vulkan Validation Layers from the KhronosGroup GitHub.

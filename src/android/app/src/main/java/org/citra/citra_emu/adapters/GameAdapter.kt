@@ -393,9 +393,9 @@ class GameAdapter(
             launchGame(view, holder.game, LaunchCastMode.DualDevice)
         }
 
-        bottomSheetView.findViewById<MaterialButton>(R.id.about_game_play_tv).setOnClickListener {
+        bottomSheetView.findViewById<MaterialButton>(R.id.about_game_play_moonlight).setOnClickListener {
             bottomSheetDialog.dismiss()
-            launchGame(view, holder.game, LaunchCastMode.TvMainScreen)
+            launchGame(view, holder.game, LaunchCastMode.Moonlight)
         }
 
         bottomSheetView.findViewById<TextView>(R.id.about_game_playtime).text =
@@ -599,8 +599,8 @@ class GameAdapter(
                 when (castMode) {
                     LaunchCastMode.DualDevice ->
                         putExtra(EmulationActivity.EXTRA_DUAL_DEVICE_CAST_ON_START, true)
-                    LaunchCastMode.TvMainScreen ->
-                        putExtra(EmulationActivity.EXTRA_TV_MAIN_SCREEN_CAST_ON_START, true)
+                    LaunchCastMode.Moonlight ->
+                        putExtra(EmulationActivity.EXTRA_MOONLIGHT_CAST_ON_START, true)
                     LaunchCastMode.None -> Unit
                 }
             }
@@ -610,7 +610,7 @@ class GameAdapter(
     private enum class LaunchCastMode {
         None,
         DualDevice,
-        TvMainScreen,
+        Moonlight,
     }
 
     private fun refreshShortcutDialogIcon() {

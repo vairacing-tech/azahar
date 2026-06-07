@@ -353,8 +353,8 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
                     true
                 }
 
-                R.id.menu_tv_main_screen_cast -> {
-                    emulationActivity.toggleTvMainScreenCast()
+                R.id.menu_moonlight_cast -> {
+                    emulationActivity.toggleMoonlightCast()
                     updateCastMenuTitles()
                     true
                 }
@@ -1406,11 +1406,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
                 R.string.dual_device_cast
             }
         )
-        binding.inGameMenu.menu.findItem(R.id.menu_tv_main_screen_cast).title = resources.getString(
-            if (emulationActivity.isTvMainScreenCastRunning()) {
-                R.string.tv_main_screen_cast_stop
+        binding.inGameMenu.menu.findItem(R.id.menu_moonlight_cast).title = resources.getString(
+            if (emulationActivity.isMoonlightCastRunning()) {
+                R.string.moonlight_cast_stop
             } else {
-                R.string.tv_main_screen_cast
+                R.string.moonlight_cast
             }
         )
     }
