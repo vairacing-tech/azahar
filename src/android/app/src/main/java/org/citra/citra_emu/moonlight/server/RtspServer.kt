@@ -54,12 +54,23 @@ class RtspServer(
         ClientConnectionState.mark("RTSP", socket.inetAddress.hostAddress)
         val reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
         val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8))
-        val requestLine = reader.readLine() ?: return
-        if (requestLine.isBlank()) return
+        while (running.get() && !socket.isClosed) {
+            val requestLine = reader.readLine() ?: return
+            if (requestLine.isBlank()) continue
+            if (!handleRequest(requestLine, reader, writer)) {
+                return
+            }
+        }
+    }
 
+    private fun handleRequest(
+        requestLine: String,
+        reader: BufferedReader,
+        writer: BufferedWriter,
+    ): Boolean {
         val headers = mutableMapOf<String, String>()
         while (true) {
-            val line = reader.readLine() ?: return
+            val line = reader.readLine() ?: return false
             if (line.isEmpty()) break
             val index = line.indexOf(':')
             if (index > 0) {
@@ -71,6 +82,7 @@ class RtspServer(
         val target = requestLine.substringAfter(' ', "").substringBefore(' ')
         val cseq = headers["cseq"] ?: "1"
         val body = readBody(reader, headers["content-length"]?.toIntOrNull() ?: 0)
+        onLog("RTSP $method $target")
         var responseStatus = 200
         var responseReason = "OK"
         if (method == "ANNOUNCE" && !parseAnnounce(body)) {
@@ -102,6 +114,7 @@ class RtspServer(
         writer.write("\r\n")
         writer.write(responseBody)
         writer.flush()
+        return method != "TEARDOWN" && responseStatus < 500
     }
 
     private fun readBody(reader: BufferedReader, contentLength: Int): String {

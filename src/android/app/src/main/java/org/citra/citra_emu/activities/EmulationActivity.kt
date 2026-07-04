@@ -201,9 +201,7 @@ class EmulationActivity : AppCompatActivity() {
         try {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
             val host = createMoonlightCastHost(protectNativeSurface = isVulkanRendererSelected())
-            host.start()
-            moonlightCastHost = host
-            host.showPairingDialog(
+            host.setPendingGameStart(
                 onStartGame = {
                     startEmulationGraph(game, navController)
                 },
@@ -211,6 +209,9 @@ class EmulationActivity : AppCompatActivity() {
                     finish()
                 }
             )
+            host.start()
+            moonlightCastHost = host
+            host.showPairingDialog()
         } catch (e: Exception) {
             applyOrientationSettings()
             Toast.makeText(

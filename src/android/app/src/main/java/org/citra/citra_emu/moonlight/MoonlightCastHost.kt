@@ -68,9 +68,10 @@ class MoonlightCastHost(
     private var codecStatusText: TextView? = null
     private var logText: TextView? = null
     private var startGameButton: Button? = null
+    private var startGameInlineButton: Button? = null
     private var onStartGame: (() -> Unit)? = null
     private var onCancelBeforeGame: (() -> Unit)? = null
-    private var startedGameFromDialog = false
+    private val gameStartRequested = AtomicBoolean(false)
 
     private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
     private val previousSecondaryLayout = IntSetting.SECONDARY_DISPLAY_LAYOUT.int
@@ -101,6 +102,7 @@ class MoonlightCastHost(
                 onIdrRequested = { encoderSession?.requestSyncFrame() },
                 onVideoCongestion = { encoderSession?.requestSyncFrame() },
                 onStreamConfigRequested = { requestedConfig -> startOrRestartCapture(requestedConfig) },
+                onLaunchRequested = { requestGameStart("Moonlight launch") },
                 onPinChanged = { newPin -> currentPin = newPin },
                 onLog = { log(it) },
             )
@@ -120,8 +122,10 @@ class MoonlightCastHost(
         onStartGame: (() -> Unit)? = null,
         onCancelBeforeGame: (() -> Unit)? = null,
     ) {
-        this.onStartGame = onStartGame
-        this.onCancelBeforeGame = onCancelBeforeGame
+        if (onStartGame != null || onCancelBeforeGame != null) {
+            setPendingGameStart(onStartGame, onCancelBeforeGame)
+        }
+        val canStartGame = this.onStartGame != null
 
         val density = activity.resources.displayMetrics.density
         val padding = (24 * density).toInt()
@@ -152,6 +156,16 @@ class MoonlightCastHost(
                 }
             }
         }
+        val inlineStartButton = if (canStartGame) {
+            Button(activity).apply {
+                setText(R.string.moonlight_cast_start_game)
+                setOnClickListener {
+                    requestGameStart("host dialog")
+                }
+            }
+        } else {
+            null
+        }
         val logs = TextView(activity).apply {
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
@@ -163,11 +177,13 @@ class MoonlightCastHost(
         pairingStatusText = statusText
         codecStatusText = codecText
         logText = logs
+        startGameInlineButton = inlineStartButton
         content.addView(addressText)
         content.addView(statusText)
         content.addView(codecText)
         content.addView(pinInput)
         content.addView(pinButton)
+        inlineStartButton?.let(content::addView)
         content.addView(scrollView)
 
         pairingDialog = MaterialAlertDialogBuilder(activity)
@@ -175,7 +191,7 @@ class MoonlightCastHost(
             .setMessage(R.string.moonlight_cast_pairing_message)
             .setView(content)
             .apply {
-                if (onStartGame != null) {
+                if (canStartGame) {
                     setPositiveButton(R.string.moonlight_cast_start_game, null)
                 }
             }
@@ -183,20 +199,44 @@ class MoonlightCastHost(
             .setOnCancelListener { handlePairingCancel() }
             .show()
 
-        if (onStartGame != null) {
+        if (canStartGame) {
             startGameButton = (pairingDialog as? AlertDialog)?.getButton(AlertDialog.BUTTON_POSITIVE)
             startGameButton?.setOnClickListener {
-                if (startedGameFromDialog) {
-                    return@setOnClickListener
-                }
-                startedGameFromDialog = true
-                onStartGame()
-                it.isEnabled = false
-                (it as? TextView)?.setText(R.string.moonlight_cast_game_started)
-                pairingDialog?.setOnCancelListener(null)
-                pairingDialog?.dismiss()
-                pairingDialog = null
+                requestGameStart("host dialog")
             }
+        }
+    }
+
+    fun setPendingGameStart(
+        onStartGame: (() -> Unit)?,
+        onCancelBeforeGame: (() -> Unit)?,
+    ) {
+        this.onStartGame = onStartGame
+        this.onCancelBeforeGame = onCancelBeforeGame
+        gameStartRequested.set(false)
+    }
+
+    private fun requestGameStart(reason: String) {
+        val startGame = onStartGame
+        if (startGame == null) {
+            log("$reason received while game is already running")
+            encoderSession?.requestSyncFrame()
+            return
+        }
+        if (!gameStartRequested.compareAndSet(false, true)) {
+            return
+        }
+        log("Starting game after $reason")
+        activity.runOnUiThread {
+            pairingStatusText?.setText(R.string.moonlight_cast_game_started)
+            startGameButton?.isEnabled = false
+            startGameInlineButton?.isEnabled = false
+            startGameButton?.setText(R.string.moonlight_cast_game_started)
+            startGameInlineButton?.setText(R.string.moonlight_cast_game_started)
+            pairingDialog?.setOnCancelListener(null)
+            pairingDialog?.dismiss()
+            pairingDialog = null
+            startGame()
         }
     }
 
@@ -346,6 +386,7 @@ class MoonlightCastHost(
             codecStatusText = null
             logText = null
             startGameButton = null
+            startGameInlineButton = null
             restoreLayout()
             restoreSecondaryDisplay()
             if (!previousKeepScreenOn) {
