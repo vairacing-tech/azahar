@@ -5,6 +5,7 @@ import java.io.EOFException
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
@@ -51,18 +52,28 @@ class LegacyControlTcpServer(
         val output = socket.getOutputStream()
         val header = ByteArray(4)
         while (running.get() && !socket.isClosed) {
-            if (!readFully(input, header)) return
+            val hasHeader = try {
+                input.readFully(header)
+                true
+            } catch (_: SocketTimeoutException) {
+                false
+            } catch (_: EOFException) {
+                return
+            }
+            if (!hasHeader) continue
             val type = header.readU16Le(0)
             val payloadLength = header.readU16Le(2)
             if (payloadLength > 0) {
                 val payload = ByteArray(payloadLength)
                 if (!readFully(input, payload)) return
             }
-            if (type == REQUEST_IDR_GEN4 || type == REQUEST_IDR_GEN3) {
+            if (requestsIdr(type)) {
                 requestIdrIfDue()
             }
-            output.write(reply(type))
-            output.flush()
+            if (expectsReply(type)) {
+                output.write(reply(type))
+                output.flush()
+            }
         }
     }
 
@@ -72,7 +83,23 @@ class LegacyControlTcpServer(
             true
         } catch (_: EOFException) {
             false
+        } catch (_: SocketTimeoutException) {
+            false
         }
+
+    private fun requestsIdr(type: Int): Boolean =
+        type == REQUEST_IDR_GEN4 ||
+            type == REQUEST_IDR_GEN3 ||
+            type == INVALIDATE_REF_FRAMES_GEN4 ||
+            type == INVALIDATE_REF_FRAMES_GEN3
+
+    private fun expectsReply(type: Int): Boolean =
+        type == REQUEST_IDR_GEN4 ||
+            type == REQUEST_IDR_GEN3 ||
+            type == START_B_GEN4 ||
+            type == START_B_GEN3 ||
+            type == INVALIDATE_REF_FRAMES_GEN4 ||
+            type == INVALIDATE_REF_FRAMES_GEN3
 
     private fun reply(type: Int): ByteArray =
         ByteBuffer.allocate(4)
@@ -94,6 +121,10 @@ class LegacyControlTcpServer(
     companion object {
         private const val REQUEST_IDR_GEN3 = 0x1407
         private const val REQUEST_IDR_GEN4 = 0x0606
+        private const val START_B_GEN3 = 0x1410
+        private const val START_B_GEN4 = 0x0609
+        private const val INVALIDATE_REF_FRAMES_GEN3 = 0x1404
+        private const val INVALIDATE_REF_FRAMES_GEN4 = 0x0604
         private const val IDR_REQUEST_MIN_INTERVAL_MS = 250L
     }
 }
