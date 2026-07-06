@@ -72,6 +72,8 @@ class MoonlightCastHost(
     private var onStartGame: (() -> Unit)? = null
     private var onCancelBeforeGame: (() -> Unit)? = null
     private val gameStartRequested = AtomicBoolean(false)
+    private val gameStartDispatched = AtomicBoolean(false)
+    private var launchFallbackRunnable: Runnable? = null
 
     private val previousScreenLayout = IntSetting.SCREEN_LAYOUT.int
     private val previousSecondaryLayout = IntSetting.SECONDARY_DISPLAY_LAYOUT.int
@@ -216,6 +218,8 @@ class MoonlightCastHost(
         this.onStartGame = onStartGame
         this.onCancelBeforeGame = onCancelBeforeGame
         gameStartRequested.set(false)
+        gameStartDispatched.set(false)
+        cancelLaunchFallback()
     }
 
     private fun requestGameStart(reason: String, requestedConfig: StreamConfig? = null) {
@@ -232,6 +236,18 @@ class MoonlightCastHost(
 
         if (protectNativeSurface && encoderSurface == null) {
             val initialConfig = requestedConfig ?: activeStreamConfig ?: defaultConfig()
+            if (
+                MoonlightLaunchStartPolicy.shouldWaitForRtspBeforeStarting(
+                    protectNativeSurface = protectNativeSurface,
+                    hasEncoderSurface = false,
+                    launchConfig = requestedConfig,
+                )
+            ) {
+                log("Waiting for RTSP ANNOUNCE before starting game so the client can choose codec")
+                scheduleGameStartFallback(initialConfig)
+                return
+            }
+
             if (startOrRestartCapture(initialConfig) == null) {
                 gameStartRequested.set(false)
                 log("Game start blocked: Moonlight encoder surface is not available")
@@ -239,6 +255,17 @@ class MoonlightCastHost(
             }
         }
 
+        dispatchPendingGameStart()
+    }
+
+    private fun dispatchPendingGameStart() {
+        val startGame = onStartGame ?: return
+        if (!gameStartDispatched.compareAndSet(false, true)) {
+            return
+        }
+        cancelLaunchFallback()
+        onStartGame = null
+        onCancelBeforeGame = null
         activity.runOnUiThread {
             pairingStatusText?.setText(R.string.moonlight_cast_game_started)
             startGameButton?.isEnabled = false
@@ -250,6 +277,35 @@ class MoonlightCastHost(
             pairingDialog = null
             activity.window.decorView.postDelayed({ startGame() }, START_GAME_AFTER_DIALOG_DELAY_MS)
         }
+    }
+
+    private fun scheduleGameStartFallback(config: StreamConfig) {
+        cancelLaunchFallback()
+        val runnable = Runnable {
+            if (
+                !gameStartRequested.get() ||
+                gameStartDispatched.get() ||
+                encoderSurface != null ||
+                onStartGame == null
+            ) {
+                return@Runnable
+            }
+
+            log("RTSP ANNOUNCE was not received before launch fallback; starting with advertised codec")
+            if (startOrRestartCapture(config) == null) {
+                gameStartRequested.set(false)
+                log("Game start blocked: Moonlight encoder surface is not available")
+                return@Runnable
+            }
+            dispatchPendingGameStart()
+        }
+        launchFallbackRunnable = runnable
+        activity.window.decorView.postDelayed(runnable, START_GAME_AFTER_RTSP_WAIT_MS)
+    }
+
+    private fun cancelLaunchFallback() {
+        launchFallbackRunnable?.let { activity.window.decorView.removeCallbacks(it) }
+        launchFallbackRunnable = null
     }
 
     @Synchronized
@@ -330,6 +386,9 @@ class MoonlightCastHost(
                 "Streaming ${config.width}x${config.height}@${config.fps} " +
                     "${mimeLabel(encoderInfo.mime)} via ${encoderInfo.codecName}",
             )
+            if (protectNativeSurface && gameStartRequested.get() && !gameStartDispatched.get()) {
+                dispatchPendingGameStart()
+            }
             encoderInfo.mime
         } catch (e: Exception) {
             stopCapturePipeline()
@@ -414,6 +473,7 @@ class MoonlightCastHost(
             return
         }
 
+        cancelLaunchFallback()
         stopCapturePipeline()
         stopAudioPipeline()
         gameStreamServer?.stop()
@@ -655,5 +715,6 @@ class MoonlightCastHost(
         private const val BYTES_PER_SAMPLE = 2
         private const val MAX_RECENT_LOGS = 80
         private const val START_GAME_AFTER_DIALOG_DELAY_MS = 150L
+        private const val START_GAME_AFTER_RTSP_WAIT_MS = 1_500L
     }
 }
