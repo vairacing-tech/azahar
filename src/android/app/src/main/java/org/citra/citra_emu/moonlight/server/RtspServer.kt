@@ -57,9 +57,8 @@ class RtspServer(
         while (running.get() && !socket.isClosed) {
             val requestLine = reader.readLine() ?: return
             if (requestLine.isBlank()) continue
-            if (!handleRequest(requestLine, reader, writer)) {
-                return
-            }
+            handleRequest(requestLine, reader, writer)
+            return
         }
     }
 
