@@ -1473,6 +1473,17 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
     private class EmulationState(private val gamePath: String) {
         private var state: State
         private var surface: Surface? = null
+        private val surfaceRetryHandler = Handler(Looper.getMainLooper())
+        private var surfaceRetryPosted = false
+        private var surfaceRetryCount = 0
+        private val retrySurfaceRun = Runnable {
+            synchronized(this) {
+                surfaceRetryPosted = false
+                if (state != State.RUNNING && surface != null) {
+                    runWithValidSurface()
+                }
+            }
+        }
 
         init {
             // Starting state is stopped.
@@ -1552,6 +1563,9 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
         @Synchronized
         fun newSurface(surface: Surface?) {
             this.surface = surface
+            surfaceRetryHandler.removeCallbacks(retrySurfaceRun)
+            surfaceRetryPosted = false
+            surfaceRetryCount = 0
             if (this.surface != null) {
                 runWithValidSurface()
             }
@@ -1559,6 +1573,9 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
 
         @Synchronized
         fun clearSurface() {
+            surfaceRetryHandler.removeCallbacks(retrySurfaceRun)
+            surfaceRetryPosted = false
+            surfaceRetryCount = 0
             if (surface == null) {
                 Log.warning("[EmulationFragment] clearSurface called, but surface already null.")
             } else {
@@ -1582,7 +1599,17 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
         }
 
         private fun runWithValidSurface() {
-            NativeLibrary.surfaceChanged(surface!!)
+            val currentSurface = surface
+            if (!EmulationSurfacePolicy.canRunWithSurface(
+                    surfacePresent = currentSurface != null,
+                    surfaceValid = currentSurface?.isValid == true,
+                )
+            ) {
+                scheduleSurfaceRetry()
+                return
+            }
+
+            NativeLibrary.surfaceChanged(currentSurface!!)
             when (state) {
                 State.STOPPED -> {
                     Thread({
@@ -1603,6 +1630,24 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
             state = State.RUNNING
         }
 
+        private fun scheduleSurfaceRetry() {
+            if (surfaceRetryPosted || state == State.RUNNING) {
+                return
+            }
+            if (surfaceRetryCount >= MAX_SURFACE_START_RETRIES) {
+                Log.error("[EmulationFragment] Surface stayed invalid; emulation start deferred.")
+                return
+            }
+
+            surfaceRetryCount++
+            surfaceRetryPosted = true
+            Log.warning(
+                "[EmulationFragment] Surface not ready; deferring emulation start " +
+                    "retry $surfaceRetryCount/$MAX_SURFACE_START_RETRIES.",
+            )
+            surfaceRetryHandler.postDelayed(retrySurfaceRun, SURFACE_START_RETRY_DELAY_MS)
+        }
+
         private enum class State {
             STOPPED,
             RUNNING,
@@ -1612,5 +1657,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback, Choreographer.Fram
 
     companion object {
         private val perfStatsUpdateHandler = Handler(Looper.myLooper()!!)
+        private const val SURFACE_START_RETRY_DELAY_MS = 16L
+        private const val MAX_SURFACE_START_RETRIES = 120
     }
 }

@@ -102,7 +102,9 @@ class MoonlightCastHost(
                 onIdrRequested = { encoderSession?.requestSyncFrame() },
                 onVideoCongestion = { encoderSession?.requestSyncFrame() },
                 onStreamConfigRequested = { requestedConfig -> startOrRestartCapture(requestedConfig) },
-                onLaunchRequested = { requestGameStart("Moonlight launch") },
+                onLaunchRequested = { requestedConfig ->
+                    requestGameStart("Moonlight launch", requestedConfig)
+                },
                 onPinChanged = { newPin -> currentPin = newPin },
                 onLog = { log(it) },
             )
@@ -216,7 +218,7 @@ class MoonlightCastHost(
         gameStartRequested.set(false)
     }
 
-    private fun requestGameStart(reason: String) {
+    private fun requestGameStart(reason: String, requestedConfig: StreamConfig? = null) {
         val startGame = onStartGame
         if (startGame == null) {
             log("$reason received while game is already running")
@@ -227,6 +229,16 @@ class MoonlightCastHost(
             return
         }
         log("Starting game after $reason")
+
+        if (protectNativeSurface && encoderSurface == null) {
+            val initialConfig = requestedConfig ?: activeStreamConfig ?: defaultConfig()
+            if (startOrRestartCapture(initialConfig) == null) {
+                gameStartRequested.set(false)
+                log("Game start blocked: Moonlight encoder surface is not available")
+                return
+            }
+        }
+
         activity.runOnUiThread {
             pairingStatusText?.setText(R.string.moonlight_cast_game_started)
             startGameButton?.isEnabled = false
@@ -236,7 +248,7 @@ class MoonlightCastHost(
             pairingDialog?.setOnCancelListener(null)
             pairingDialog?.dismiss()
             pairingDialog = null
-            startGame()
+            activity.window.decorView.postDelayed({ startGame() }, START_GAME_AFTER_DIALOG_DELAY_MS)
         }
     }
 
@@ -246,6 +258,35 @@ class MoonlightCastHost(
         if (encoderSession != null && activeStreamConfig == config && currentMime != null) {
             encoderSession?.requestSyncFrame()
             return currentMime
+        }
+        val lockedConfig = activeStreamConfig
+        if (
+            protectNativeSurface &&
+            NativeLibrary.isRunning() &&
+            encoderSession != null &&
+            lockedConfig != null &&
+            currentMime != null
+        ) {
+            if (MoonlightStreamLock.canReuseLockedEncoder(lockedConfig, config, currentMime)) {
+                if (lockedConfig.bitrate != config.bitrate) {
+                    encoderSession?.setVideoBitrate(config.bitrate)
+                }
+                activeStreamConfig = config
+                encoderSession?.requestSyncFrame()
+                return currentMime
+            }
+
+            log(
+                "Rejected Moonlight stream config: Vulkan encoder surface is locked at " +
+                    "${lockedConfig.resolutionLabel}@${lockedConfig.fps} ${mimeLabel(currentMime)}",
+            )
+            updateDialogStatus(
+                activity.getString(
+                    R.string.moonlight_cast_error,
+                    "Vulkan stream config is locked after game start",
+                ),
+            )
+            return null
         }
 
         val encoderInfo = runCatching {
@@ -613,5 +654,6 @@ class MoonlightCastHost(
         private const val OPUS_CHANNELS = 2
         private const val BYTES_PER_SAMPLE = 2
         private const val MAX_RECENT_LOGS = 80
+        private const val START_GAME_AFTER_DIALOG_DELAY_MS = 150L
     }
 }

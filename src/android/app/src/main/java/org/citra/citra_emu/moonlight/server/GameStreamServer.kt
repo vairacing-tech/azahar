@@ -18,7 +18,7 @@ class GameStreamServer(
     private val onIdrRequested: () -> Unit,
     private val onVideoCongestion: () -> Unit,
     private val onStreamConfigRequested: (StreamConfig) -> String?,
-    private val onLaunchRequested: () -> Unit,
+    private val onLaunchRequested: (StreamConfig?) -> Unit,
     private val onPinChanged: (String) -> Unit,
     private val onLog: (String) -> Unit,
 ) {
@@ -129,7 +129,7 @@ class GameStreamServer(
                     requestedConfig.codecPreference.name,
             )
         }
-        onLaunchRequested()
+        onLaunchRequested(requestedConfig)
         return true
     }
 
