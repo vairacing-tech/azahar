@@ -6,7 +6,7 @@ internal data class EncoderFrameRateValues(
     val frameRate: Int,
     val operatingRate: Int,
     val maxFpsToEncoder: Float,
-    val repeatPreviousFrameAfterUs: Long,
+    val repeatPreviousFrameAfterUs: Long?,
 )
 
 internal object EncoderFrameRateConfig {
@@ -16,7 +16,7 @@ internal object EncoderFrameRateConfig {
             frameRate = fps,
             operatingRate = fps,
             maxFpsToEncoder = fps.toFloat(),
-            repeatPreviousFrameAfterUs = (1_000_000L / fps).coerceAtLeast(1L),
+            repeatPreviousFrameAfterUs = null,
         )
     }
 
@@ -25,9 +25,8 @@ internal object EncoderFrameRateConfig {
         format.setInteger(MediaFormat.KEY_FRAME_RATE, values.frameRate)
         format.setInteger(MediaFormat.KEY_OPERATING_RATE, values.operatingRate)
         format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, values.maxFpsToEncoder)
-        format.setLong(
-            MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
-            values.repeatPreviousFrameAfterUs,
-        )
+        values.repeatPreviousFrameAfterUs?.let { repeatAfterUs ->
+            format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatAfterUs)
+        }
     }
 }

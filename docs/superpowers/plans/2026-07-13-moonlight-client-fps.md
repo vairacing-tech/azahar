@@ -46,6 +46,7 @@ package org.citra.citra_emu.moonlight
 
 import org.citra.citra_emu.moonlight.encoder.EncoderFrameRateConfig
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class EncoderFrameRateConfigTest {
@@ -56,7 +57,6 @@ class EncoderFrameRateConfigTest {
         assertEquals(30, values.frameRate)
         assertEquals(30, values.operatingRate)
         assertEquals(30f, values.maxFpsToEncoder)
-        assertEquals(33_333L, values.repeatPreviousFrameAfterUs)
     }
 
     @Test
@@ -66,7 +66,13 @@ class EncoderFrameRateConfigTest {
         assertEquals(45, values.frameRate)
         assertEquals(45, values.operatingRate)
         assertEquals(45f, values.maxFpsToEncoder)
-        assertEquals(22_222L, values.repeatPreviousFrameAfterUs)
+    }
+
+    @Test
+    fun doesNotRepeatFramesBeyondRequestedLimit() {
+        val values = EncoderFrameRateConfig.forFps(60)
+
+        assertNull(values.repeatPreviousFrameAfterUs)
     }
 }
 ```
@@ -94,7 +100,7 @@ internal data class EncoderFrameRateValues(
     val frameRate: Int,
     val operatingRate: Int,
     val maxFpsToEncoder: Float,
-    val repeatPreviousFrameAfterUs: Long,
+    val repeatPreviousFrameAfterUs: Long?,
 )
 
 internal object EncoderFrameRateConfig {
@@ -104,7 +110,7 @@ internal object EncoderFrameRateConfig {
             frameRate = fps,
             operatingRate = fps,
             maxFpsToEncoder = fps.toFloat(),
-            repeatPreviousFrameAfterUs = (1_000_000L / fps).coerceAtLeast(1L),
+            repeatPreviousFrameAfterUs = null,
         )
     }
 
@@ -113,15 +119,14 @@ internal object EncoderFrameRateConfig {
         format.setInteger(MediaFormat.KEY_FRAME_RATE, values.frameRate)
         format.setInteger(MediaFormat.KEY_OPERATING_RATE, values.operatingRate)
         format.setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, values.maxFpsToEncoder)
-        format.setLong(
-            MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
-            values.repeatPreviousFrameAfterUs,
-        )
+        values.repeatPreviousFrameAfterUs?.let { repeatAfterUs ->
+            format.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatAfterUs)
+        }
     }
 }
 ```
 
-In `EncoderSession.start()`, replace the four direct frame-rate assignments with:
+In `EncoderSession.start()`, replace the direct frame-rate assignments with:
 
 ```kotlin
 EncoderFrameRateConfig.applyTo(this, config.fps)

@@ -21,9 +21,11 @@ resolution, codec, bitrate, and FPS. `EncoderSelector` continues to reject
 formats that the hardware encoder does not support.
 
 `EncoderSession` will configure the surface-input encoder with the requested
-frame rate, operating rate, and Android's maximum-FPS-to-encoder format key.
-Frame limiting therefore happens inside MediaCodec before predictive frames are
-created. This avoids sending dependent P frames whose references were dropped.
+frame rate, operating rate, and Android's maximum-FPS-to-encoder format key. It
+will not request repeated previous frames because vendor encoders may emit those
+copies after applying the maximum-FPS limit. Frame limiting therefore happens
+inside MediaCodec before predictive frames are created. This avoids sending
+dependent P frames whose references were dropped or exceeding the client rate.
 
 `VideoRtpTransport` will derive each 90 kHz RTP timestamp from the encoded
 frame's `presentationTimeUs`. The first accepted frame establishes timestamp
