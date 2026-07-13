@@ -23,6 +23,7 @@ class VideoRtpTransport(
     private val running = AtomicBoolean(false)
     private val pendingFrames = ArrayBlockingQueue<EncodedFrame>(MAX_PENDING_VIDEO_FRAMES)
     private val packetScratch = ByteArray(MAX_UDP_PACKET_SIZE)
+    private val timestampTracker = RtpTimestampTracker()
     private var socket: DatagramSocket? = null
     @Volatile private var peer: InetSocketAddress? = null
     private var receiveThread: Thread? = null
@@ -45,6 +46,7 @@ class VideoRtpTransport(
         droppedFrames = 0L
         lastCongestionSignalMs = 0L
         pendingFrames.clear()
+        timestampTracker.reset()
         socket = DatagramSocket(port, InetAddress.getByName("0.0.0.0")).also {
             it.soTimeout = 1_000
             it.sendBufferSize = 1024 * 1024
@@ -95,6 +97,7 @@ class VideoRtpTransport(
         frameIndex = 1
         sentFrames = 0L
         droppedFrames = 0L
+        timestampTracker.reset()
         receiveThread = null
         senderThread = null
     }
@@ -153,7 +156,7 @@ class VideoRtpTransport(
         }
 
         val currentFrame = frameIndex++
-        val timestamp = RtpTimestamp.forFrame(currentFrame, frameRate)
+        val timestamp = timestampTracker.timestampFor(frame.presentationTimeUs)
         val datagram = DatagramPacket(packetScratch, packetScratch.size, activePeer.address, activePeer.port)
         var offset = 0
         for (packetIndex in 0 until dataPackets) {
@@ -334,7 +337,30 @@ internal object NvVideoPacketHeader {
         (index and STREAM_PACKET_INDEX_MASK) shl 8
 }
 
-internal object RtpTimestamp {
-    fun forFrame(frameIndex: Int, fps: Int): Int =
-        (((frameIndex - 1).coerceAtLeast(0).toLong() * 90_000L) / fps.coerceAtLeast(1)).toInt()
+internal class RtpTimestampTracker {
+    private var basePresentationTimeUs: Long? = null
+    private var lastTimestamp = -1L
+
+    fun timestampFor(presentationTimeUs: Long): Int {
+        val base = basePresentationTimeUs ?: presentationTimeUs.also {
+            basePresentationTimeUs = it
+        }
+        val elapsedUs = (presentationTimeUs - base).coerceAtLeast(0L)
+        val ptsTimestamp =
+            (elapsedUs * RTP_CLOCK_RATE + TIMESTAMP_ROUNDING_OFFSET) / MICROSECONDS_PER_SECOND
+        val nextTimestamp = ptsTimestamp.coerceAtLeast(lastTimestamp + 1L)
+        lastTimestamp = nextTimestamp
+        return nextTimestamp.toInt()
+    }
+
+    fun reset() {
+        basePresentationTimeUs = null
+        lastTimestamp = -1L
+    }
+
+    private companion object {
+        const val RTP_CLOCK_RATE = 90_000L
+        const val MICROSECONDS_PER_SECOND = 1_000_000L
+        const val TIMESTAMP_ROUNDING_OFFSET = MICROSECONDS_PER_SECOND / 2L
+    }
 }
