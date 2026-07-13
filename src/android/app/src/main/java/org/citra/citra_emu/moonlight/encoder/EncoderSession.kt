@@ -33,11 +33,9 @@ class EncoderSession(
         val format = MediaFormat.createVideoFormat(encoderInfo.mime, config.width, config.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, config.iFrameIntervalSeconds)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
-            setInteger(MediaFormat.KEY_OPERATING_RATE, config.fps)
-            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, repeatFrameAfterUs(config.fps))
+            EncoderFrameRateConfig.applyTo(this, config.fps)
             setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
             if (encoderInfo.cbrSupported) {
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
@@ -59,9 +57,6 @@ class EncoderSession(
         requestSyncFrame()
         return surface
     }
-
-    private fun repeatFrameAfterUs(fps: Int): Long =
-        (1_000_000L / fps.coerceAtLeast(1)).coerceAtLeast(1L)
 
     fun requestSyncFrame() {
         val codec = codec ?: return
